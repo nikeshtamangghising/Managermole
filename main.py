@@ -84,7 +84,7 @@ def help_command(update: Update, context) -> None:
         "/stats - View statistics about your collected messages\n\n"
 
         "📊 <b>Export Options</b>:\n"
-        "/export_csv - Export results as a CSV file\n"
+        "/export_csv - Export results as a CSV file with row-by-row sums\n"
         "/export_json - Export results as a JSON file\n\n"
 
         "💡 <b>How It Works</b>:\n"
@@ -356,7 +356,7 @@ def process_command(update: Update, context) -> None:
         )
 
 def export_csv(update: Update, context) -> None:
-    """Export the results as a CSV file with 3 columns: amounts, charges, and sum."""
+    """Export the results as a CSV file with 3 columns: amounts, charges, and row-by-row sums."""
     user_id = update.effective_user.id
 
     if user_id not in user_messages or not user_messages[user_id]:
@@ -423,7 +423,7 @@ def export_csv(update: Update, context) -> None:
     try:
         with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
             # Create writer with just 3 columns
-            fieldnames = ['Amounts', 'Charges', 'Total Sum']
+            fieldnames = ['Amounts', 'Charges', 'Row Sum']
             writer = csv.writer(csvfile)
             
             # Write header
@@ -437,8 +437,37 @@ def export_csv(update: Update, context) -> None:
                 amount_val = amounts[i] if i < len(amounts) else ''
                 charge_val = charges[i] if i < len(charges) else ''
                 
-                # Only write the total sum in the first row
-                sum_val = str(total_sum) if i == 0 else ''
+                # Calculate the sum of amount and charge in this row
+                row_sum = 0
+                
+                # Process amount value if present
+                if amount_val:
+                    # Remove any currency symbol
+                    amount_numeric = re.sub(r'[€$£¥]', '', amount_val)
+                    # Replace comma with period if needed
+                    if decimal_separator == ',':
+                        amount_numeric = amount_numeric.replace(',', '.')
+                    # Convert to float and add to row sum
+                    try:
+                        row_sum += float(amount_numeric)
+                    except ValueError:
+                        pass
+                
+                # Process charge value if present
+                if charge_val:
+                    # Remove any currency symbol
+                    charge_numeric = re.sub(r'[€$£¥]', '', charge_val)
+                    # Replace comma with period if needed
+                    if decimal_separator == ',':
+                        charge_numeric = charge_numeric.replace(',', '.')
+                    # Convert to float and add to row sum
+                    try:
+                        row_sum += float(charge_numeric)
+                    except ValueError:
+                        pass
+                
+                # Format the row sum
+                sum_val = str(row_sum) if (amount_val or charge_val) else ''
                 
                 writer.writerow([amount_val, charge_val, sum_val])
 
@@ -447,7 +476,7 @@ def export_csv(update: Update, context) -> None:
             update.message.reply_document(
                 document=file,
                 filename=filename,
-                caption=f"📊 CSV export with {len(amounts)} amounts, {len(charges)} charges, and their sum."
+                caption=f"📊 CSV export with {len(amounts)} amounts, {len(charges)} charges, and row-by-row sums."
             )
 
         # Clean up the file
