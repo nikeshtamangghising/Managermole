@@ -1,6 +1,6 @@
 # Decimal Stripper Telegram Bot
 
-A Telegram bot that processes messages containing numbers, separating them into amounts and charges based on a threshold value.
+A Telegram bot that processes messages containing numbers, separating them into amounts and charges based on a threshold value. Now with enhanced banking features for Nepali banks.
 
 ## Features
 
@@ -9,6 +9,10 @@ A Telegram bot that processes messages containing numbers, separating them into 
 - Supports various number formats (whole numbers, decimals, currency symbols)
 - Customizable settings for decimal separator and output format
 - Export results as CSV or JSON files
+- Banking features for Nepali banks:
+  - Manually enter bank names and deposit amounts
+  - Track deposits for specific banks
+  - Calculate remaining limits for each bank
 
 ## Setup
 
@@ -37,10 +41,27 @@ The bot will start in polling mode and listen for messages.
 - `/help` - Show help message
 - `/process` - Process all collected messages and separate amounts and charges
 - `/clear` - Start over with a new collection
-- `/settings` - Customize your number processing preferences
+- `/settings` - Customize your number processing preferences and access banking features
 - `/stats` - View statistics about your collected messages
-- `/export_csv` - Export results as a CSV file
+- `/export_csv` - Export results as a CSV file with enhanced features:
+  - Manually enter deposit amounts and bank names
+  - Append to existing CSV files for daily tracking
+  - Previous day's remaining balance is automatically used as today's starting balance
+  - Automatically calculate running totals across multiple days
 - `/export_json` - Export results as a JSON file
+
+## Banking Features
+
+- **Bank Deposit Entry**: 
+  - Select from a list of Nepali banks
+  - Manually enter deposit amounts
+  - Track total deposits for each bank
+
+- **Remaining Limit Calculator**:
+  - Select a bank from the list
+  - Enter the bank's deposit limit
+  - Automatically calculate remaining limit (limit - total deposits)
+  - Monitor your remaining deposit capacity for each bank
 
 ## How It Works
 
