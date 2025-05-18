@@ -1571,9 +1571,8 @@ def main():
 
         # Start the Bot with a higher allowed_updates interval to prevent conflicts
         try:
-            # Use clean=True to ensure any previous webhook is removed
             # Use drop_pending_updates=True to ignore updates that arrived while the bot was offline
-            updater.start_polling(drop_pending_updates=True, clean=True)
+            updater.start_polling(drop_pending_updates=True)
             logging.info("Bot started successfully")
         except Exception as e:
             logging.error(f"Failed to start bot: {e}")
@@ -1582,7 +1581,7 @@ def main():
             try:
                 # Try with more aggressive settings to avoid conflicts
                 updater.bot.delete_webhook(drop_pending_updates=True)
-                updater.start_polling(timeout=30, drop_pending_updates=True, clean=True)
+                updater.start_polling(timeout=30, drop_pending_updates=True)
                 logging.info("Bot started successfully after retry")
             except Exception as retry_e:
                 logging.error(f"Failed to start bot after retry: {retry_e}")
