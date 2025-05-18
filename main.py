@@ -549,8 +549,21 @@ def ask_for_deposit_info(update: Update, context) -> None:
 
 def handle_conversation(update: Update, context) -> None:
     """Handle the conversation flow for collecting deposit information."""
-    user_id = update.effective_user.id
-    text = update.message.text
+    # Safely extract user_id and text from the update object
+    if hasattr(update, 'effective_user') and update.effective_user is not None:
+        user_id = update.effective_user.id
+    elif hasattr(update, 'message') and hasattr(update.message, 'from_user') and update.message.from_user is not None:
+        user_id = update.message.from_user.id
+    else:
+        logger.error("Could not determine user_id in handle_conversation")
+        return
+    
+    # Safely extract text from the message
+    if hasattr(update, 'message') and hasattr(update.message, 'text'):
+        text = update.message.text
+    else:
+        logger.error("No text found in message")
+        return
     
     if user_id not in user_states:
         # If no active conversation, process as a regular message
@@ -661,11 +674,31 @@ def handle_conversation(update: Update, context) -> None:
         elif text == '2' or text.lower() in ['no', 'default', 'new']:
             # Use default filename (no CSV path)
             user_states[user_id]['csv_path'] = None
-            process_export_csv(update, context, use_manual_input=True)
+            # Make sure we're using the message object, not the update directly
+            if hasattr(update, 'callback_query'):
+                # If this was triggered from a callback query
+                process_export_csv(update, context, use_manual_input=True)
+            else:
+                # If this was triggered from a text message
+                try:
+                    process_export_csv(update, context, use_manual_input=True)
+                except Exception as e:
+                    logger.error(f"Error processing CSV export: {e}")
+                    update.message.reply_text(f"❗ Error creating CSV file: {str(e)}")
+                    # Clear the conversation state on error
+                    if user_id in user_states:
+                        del user_states[user_id]
         elif os.path.isfile(text) and text.lower().endswith('.csv'):
             # User provided a valid CSV path directly
             user_states[user_id]['csv_path'] = text
-            process_export_csv(update, context, use_manual_input=True)
+            try:
+                process_export_csv(update, context, use_manual_input=True)
+            except Exception as e:
+                logger.error(f"Error processing CSV export: {e}")
+                update.message.reply_text(f"❗ Error creating CSV file: {str(e)}")
+                # Clear the conversation state on error
+                if user_id in user_states:
+                    del user_states[user_id]
         else:
             update.message.reply_text(
                 "❗ Invalid choice. Please reply with '1', '2', or a valid CSV file path:\n"
@@ -684,10 +717,19 @@ def handle_conversation(update: Update, context) -> None:
 
 def export_csv(update: Update, context) -> None:
     """Start the process of exporting results as a CSV file with manual input option."""
-    user_id = update.effective_user.id
+    # Safely extract user_id and message from the update object
+    if hasattr(update, 'effective_user') and update.effective_user is not None:
+        user_id = update.effective_user.id
+        message = update.message
+    elif hasattr(update, 'message') and hasattr(update.message, 'from_user') and update.message.from_user is not None:
+        user_id = update.message.from_user.id
+        message = update.message
+    else:
+        logger.error("Could not determine user_id in export_csv")
+        return
 
     if user_id not in user_messages or not user_messages[user_id]:
-        update.message.reply_text("❗ No messages collected yet. Forward some messages first.")
+        message.reply_text("❗ No messages collected yet. Forward some messages first.")
         return
     
     # Ask user if they want to use simple export or detailed export
@@ -697,7 +739,7 @@ def export_csv(update: Update, context) -> None:
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    update.message.reply_text(
+    message.reply_text(
         "📊 CSV Export Options:\n\n"
         "Choose your export format:\n"
         "• Simple: Just amounts, charges, and running sums\n"
@@ -706,7 +748,7 @@ def export_csv(update: Update, context) -> None:
     )
 
 def export_simple_csv(update: Update, context) -> None:
-    """Export the results as a simple CSV file with just amounts, charges, and running sums."""
+    """Export the results as a simple CSV file with amounts, charges, and running totals in a clearer format."""
     # Determine if this is called from a callback query or directly
     if hasattr(update, 'callback_query'):
         query = update.callback_query
@@ -758,7 +800,7 @@ def export_simple_csv(update: Update, context) -> None:
         )
         return
 
-    # Create a new CSV file with a simple format
+    # Create a new CSV file with an improved format
     current_dir = os.path.dirname(os.path.abspath(__file__))
     filename = os.path.join(current_dir, f"simple_export_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
     
@@ -766,52 +808,60 @@ def export_simple_csv(update: Update, context) -> None:
         with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
             
-            # Write header
-            writer.writerow(['Type', 'Value', 'Running Sum'])
+            # Write header with three columns
+            writer.writerow(['Amount', 'Charge', 'Running Total'])
             
-            # Write amounts with running sum
-            running_sum = 0
-            for amount in amounts:
-                # Remove any currency symbol and convert to float
-                numeric_str = re.sub(r'[€$£¥]', '', amount)
-                # Handle both decimal separators
-                if decimal_separator == ',':
-                    numeric_str = numeric_str.replace(',', '.')
-                
-                try:
-                    value = float(numeric_str)
-                    running_sum += value
-                    writer.writerow(['Amount', amount, f"{running_sum:.2f}"])
-                except ValueError:
-                    # Skip if conversion fails
-                    writer.writerow(['Amount', amount, ''])
+            # Prepare data for export
+            max_rows = max(len(amounts), len(charges))
+            running_total = 0
             
-            # Write charges with running sum
-            for charge in charges:
-                # Remove any currency symbol and convert to float
-                numeric_str = re.sub(r'[€$£¥]', '', charge)
-                # Handle both decimal separators
-                if decimal_separator == ',':
-                    numeric_str = numeric_str.replace(',', '.')
+            # Write data row by row
+            for i in range(max_rows):
+                amount_value = ""
+                charge_value = ""
+                amount_numeric = 0
+                charge_numeric = 0
                 
-                try:
-                    value = float(numeric_str)
-                    running_sum -= value  # Subtract charges from running sum
-                    writer.writerow(['Charge', charge, f"{running_sum:.2f}"])
-                except ValueError:
-                    # Skip if conversion fails
-                    writer.writerow(['Charge', charge, ''])
+                # Get amount if available
+                if i < len(amounts):
+                    amount_value = amounts[i]
+                    # Extract numeric value
+                    numeric_str = re.sub(r'[€$£¥]', '', amount_value)
+                    if decimal_separator == ',':
+                        numeric_str = numeric_str.replace(',', '.')
+                    try:
+                        amount_numeric = float(numeric_str)
+                    except ValueError:
+                        amount_numeric = 0
+                
+                # Get charge if available
+                if i < len(charges):
+                    charge_value = charges[i]
+                    # Extract numeric value
+                    numeric_str = re.sub(r'[€$£¥]', '', charge_value)
+                    if decimal_separator == ',':
+                        numeric_str = numeric_str.replace(',', '.')
+                    try:
+                        charge_numeric = float(numeric_str)
+                    except ValueError:
+                        charge_numeric = 0
+                
+                # Update running total
+                running_total += amount_numeric - charge_numeric
+                
+                # Write the row
+                writer.writerow([amount_value, charge_value, f"{running_total:.2f}"])
             
             # Write total row
             writer.writerow(['', '', ''])
-            writer.writerow(['TOTAL', '', f"{running_sum:.2f}"])
+            writer.writerow(['TOTAL', '', f"{running_total:.2f}"])
 
         # Send the file to the user
         with open(filename, 'rb') as file:
             message.reply_document(
                 document=file,
                 filename=os.path.basename(filename),
-                caption=f"📊 Simple CSV export with amounts, charges, and running sums.\n\nThe file includes:\n- Each amount and charge on its own row\n- Running sum calculated for each row\n- Final total at the bottom"
+                caption=f"📊 Simple CSV export with improved format.\n\nThe file includes:\n- Amounts in the first column\n- Charges in the second column\n- Running total in the third column (adds amounts, subtracts charges)\n- Final total at the bottom"
             )
 
         # Remove the temporary file
@@ -827,13 +877,22 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Balance.
     Maintains a running balance by using the previous day's remaining balance as today's starting balance."""
     # Determine if this is called from a callback query or directly
-    if hasattr(update, 'callback_query'):
+    if hasattr(update, 'callback_query') and update.callback_query is not None:
         query = update.callback_query
         user_id = query.from_user.id
         message = query.message
     else:
-        user_id = update.effective_user.id
-        message = update.message
+        # Handle the case when update.effective_user might be None
+        if hasattr(update, 'effective_user') and update.effective_user is not None:
+            user_id = update.effective_user.id
+            message = update.message
+        elif hasattr(update, 'message') and update.message is not None:
+            user_id = update.message.from_user.id
+            message = update.message
+        else:
+            # Fallback for when we can't determine the user_id
+            logger.error("Could not determine user_id from update object")
+            return
 
     if user_id not in user_messages or not user_messages[user_id]:
         message.reply_text("❗ No messages collected yet. Forward some messages first.")
@@ -1607,8 +1666,21 @@ def start_add_custom_bank(update: Update, context) -> None:
 
 def handle_conversation(update: Update, context) -> None:
     """Handle the conversation flow for collecting deposit information."""
-    user_id = update.effective_user.id
-    text = update.message.text
+    # Safely extract user_id and text from the update object
+    if hasattr(update, 'effective_user') and update.effective_user is not None:
+        user_id = update.effective_user.id
+    elif hasattr(update, 'message') and hasattr(update.message, 'from_user') and update.message.from_user is not None:
+        user_id = update.message.from_user.id
+    else:
+        logger.error("Could not determine user_id in handle_conversation")
+        return
+    
+    # Safely extract text from the message
+    if hasattr(update, 'message') and hasattr(update.message, 'text'):
+        text = update.message.text
+    else:
+        logger.error("No text found in message")
+        return
     
     if user_id not in user_states:
         # If no active conversation, process as a regular message
@@ -1743,11 +1815,31 @@ def handle_conversation(update: Update, context) -> None:
         elif text == '2' or text.lower() in ['no', 'default', 'new']:
             # Use default filename (no CSV path)
             user_states[user_id]['csv_path'] = None
-            process_export_csv(update, context, use_manual_input=True)
+            # Make sure we're using the message object, not the update directly
+            if hasattr(update, 'callback_query'):
+                # If this was triggered from a callback query
+                process_export_csv(update, context, use_manual_input=True)
+            else:
+                # If this was triggered from a text message
+                try:
+                    process_export_csv(update, context, use_manual_input=True)
+                except Exception as e:
+                    logger.error(f"Error processing CSV export: {e}")
+                    update.message.reply_text(f"❗ Error creating CSV file: {str(e)}")
+                    # Clear the conversation state on error
+                    if user_id in user_states:
+                        del user_states[user_id]
         elif os.path.isfile(text) and text.lower().endswith('.csv'):
             # User provided a valid CSV path directly
             user_states[user_id]['csv_path'] = text
-            process_export_csv(update, context, use_manual_input=True)
+            try:
+                process_export_csv(update, context, use_manual_input=True)
+            except Exception as e:
+                logger.error(f"Error processing CSV export: {e}")
+                update.message.reply_text(f"❗ Error creating CSV file: {str(e)}")
+                # Clear the conversation state on error
+                if user_id in user_states:
+                    del user_states[user_id]
         else:
             update.message.reply_text(
                 "❗ Invalid choice. Please reply with '1', '2', or a valid CSV file path:\n"
