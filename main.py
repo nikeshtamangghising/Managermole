@@ -1724,8 +1724,8 @@ def main():
             try:
                 # Clear any pending updates and delete webhook to avoid conflicts
                 updater.bot.delete_webhook(drop_pending_updates=True)
-                # Use a longer timeout and drop_pending_updates to avoid conflicts
-                updater.start_polling(timeout=30, drop_pending_updates=True, clean=True)
+                # Use a longer timeout but avoid using both drop_pending_updates and clean together
+                updater.start_polling(timeout=30, drop_pending_updates=True)
                 logging.info("Bot started successfully")
                 break  # Exit the retry loop if successful
             except Conflict as ce:
