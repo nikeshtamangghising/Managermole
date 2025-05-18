@@ -138,18 +138,47 @@ def health():
 def run():
     # Use a different port than the one used for the socket lock in main.py
     # The socket lock uses port 10001, so we'll use a different port for Flask
-    port = int(os.getenv('PORT', 8080))
+    port = int(os.getenv('PORT', 10000))  # Changed default from 8080 to 10000
     
     # Always avoid using port 10001 which is used for the socket lock
     if port == 10001:
-        port = 8080
+        port = 10000
         logging.info(f"Changed Flask port to {port} to avoid conflict with socket lock")
     
-    app.run(
-        host='0.0.0.0',
-        port=port,
-        debug=False
-    )
+    try:
+        app.run(
+            host='0.0.0.0',
+            port=port,
+            debug=False,
+            threaded=True  # Ensure Flask runs in threaded mode
+        )
+    except OSError as e:
+        # Handle case where port is already in use
+        if "Address already in use" in str(e):
+            logging.warning(f"Port {port} already in use, trying alternate port")
+            try:
+                # Try an alternate port
+                alt_port = port + 1
+                if alt_port == 10001:  # Skip the lock port
+                    alt_port += 1
+                logging.info(f"Attempting to use alternate port {alt_port}")
+                app.run(
+                    host='0.0.0.0',
+                    port=alt_port,
+                    debug=False,
+                    threaded=True
+                )
+            except Exception as inner_e:
+                logging.error(f"Failed to start on alternate port: {inner_e}")
+                return False
+        else:
+            logging.error(f"Failed to start Flask server: {e}")
+            return False
+    except Exception as e:
+        logging.error(f"Unexpected error starting Flask server: {e}")
+        return False
+    
+    return True
 
 # Track start time for uptime calculation
 START_TIME = datetime.now()
@@ -174,30 +203,40 @@ def keep_alive():
     Provides a web interface to monitor the bot's status.
     """
     try:
-        # Start the Flask server
-        t = Thread(target=run)
+        # Start the Flask server in a separate thread with a unique name
+        # This helps identify and manage the thread
+        t = Thread(target=run, name="FlaskServerThread")
         t.daemon = True
         t.start()
-        logging.info("Keep alive server started successfully")
         
         # Wait a moment to ensure the Flask server is fully initialized
         # This helps prevent race conditions with the bot polling
-        time.sleep(2)
+        time.sleep(3)  # Increased from 2 to 3 seconds
         
-        # Start the self-ping thread
-        ping_thread = Thread(target=self_ping)
+        # Check if the Flask thread is still alive after initialization
+        if not t.is_alive():
+            logging.error("Flask server thread died during initialization")
+            return False
+            
+        logging.info("Keep alive server started successfully")
+        
+        # Start the self-ping thread with a unique name
+        ping_thread = Thread(target=self_ping, name="SelfPingThread")
         ping_thread.daemon = True
         ping_thread.start()
         logging.info("Self-ping service started")
         
         # Log the URLs
-        port = int(os.getenv('PORT', 8080))
+        port = int(os.getenv('PORT', 10000))  # Changed default from 8080 to 10000
         render_url = os.getenv('RENDER_EXTERNAL_URL', f"http://0.0.0.0:{port}")
         logging.info(f"Dashboard available at: {render_url}")
         logging.info(f"Health endpoint: {render_url}/health")
-        logging.info(f"Server can be monitored at: http://0.0.0.0:{port} or your Replit URL")
+        logging.info(f"Server can be monitored at: http://0.0.0.0:{port} or your deployment URL")
     except Exception as e:
         logging.error(f"Failed to start keep alive server: {e}")
+        # Log the full traceback for better debugging
+        import traceback
+        logging.error(traceback.format_exc())
         # Don't raise the exception, just log it
         # This prevents the keep_alive failure from stopping the bot
         logging.warning("Continuing without keep alive server")

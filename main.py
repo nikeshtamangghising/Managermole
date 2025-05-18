@@ -126,22 +126,31 @@ def error_handler(update, context):
         if isinstance(context.error, Conflict):
             logging.warning("Conflict error: Another instance of the bot is already running")
             # Wait a bit and try to recover
-            time.sleep(10)  # Increased wait time
+            time.sleep(15)  # Increased wait time further
             try:
                 # Try to restart polling with clean=True to avoid conflicts
                 if hasattr(context, 'bot') and hasattr(context.bot, 'get_updates'):
                     # More aggressive cleanup
                     context.bot.delete_webhook(drop_pending_updates=True)
+                    logging.info("Deleted webhook and dropped pending updates")
+                    
                     # Force a clean state
                     if hasattr(context.dispatcher, '_update_fetcher'):
                         if hasattr(context.dispatcher._update_fetcher, '_last_update_id'):
                             context.dispatcher._update_fetcher._last_update_id = 0
-                    logging.info("Cleared webhook, pending updates, and reset update ID")
+                            logging.info("Reset update ID to 0")
+                    
+                    # Add a small delay to ensure changes take effect
+                    time.sleep(2)
+                    logging.info("Completed conflict recovery process")
             except Exception as e:
                 logging.error(f"Failed to recover from conflict: {e}")
+                # Log the full traceback for better debugging
+                import traceback
+                logging.error(traceback.format_exc())
         elif isinstance(context.error, NetworkError):
             logging.error(f"Network error: {context.error}. Waiting before retry.")
-            time.sleep(15)  # Increased wait time for network errors
+            time.sleep(20)  # Increased wait time for network errors
         else:
             # Get update information safely
             update_str = str(update) if update else "None"
@@ -1798,15 +1807,25 @@ def create_socket_lock():
     """Create a socket-based lock to ensure only one instance of the bot runs."""
     lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
+        # Set socket options to reuse the address and port
+        lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
         # Use a specific port for locking - this will fail if another instance is running
         # Use port 10001 to avoid conflicts with the web server
         lock_socket.bind(('localhost', 10001))
-        # Set socket options to reuse the address and port
-        lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        logging.info("Successfully acquired lock - this is the only running instance")
+        
+        # Set a timeout on the socket to prevent indefinite blocking
+        lock_socket.settimeout(30)
+        
+        logging.info("Successfully acquired socket lock - this is the only running instance")
         return lock_socket
     except socket.error as e:
-        logging.error(f"Failed to acquire lock - another instance is already running: {e}")
+        logging.error(f"Failed to acquire socket lock - another instance is already running: {e}")
+        # Try to close the socket if it was created but not bound
+        try:
+            lock_socket.close()
+        except:
+            pass
         return None
 
 def main():
@@ -1824,6 +1843,10 @@ def main():
         if lock_socket:
             lock_socket.close()
         return
+    
+    # Add a small delay to ensure any previous instance has fully released resources
+    logging.info("Acquired locks successfully, waiting for resources to be fully available...")
+    time.sleep(5)
     
     try:
         # Create the Updater and pass it your bot's token
@@ -1859,15 +1882,24 @@ def main():
             logging.warning("Keep alive server failed to start, but continuing with bot operation")
 
         # Start the Bot with a higher allowed_updates interval to prevent conflicts
-        max_retries = 3
+        max_retries = 5  # Increased from 3 to 5
         retry_count = 0
+        backoff_time = 5  # Initial backoff time in seconds
         
         while retry_count < max_retries:
             try:
-                # Clear any pending updates and delete webhook to avoid conflicts
+                # More aggressive cleanup before starting
+                logging.info(f"Attempt {retry_count + 1}/{max_retries} to start bot")
+                
+                # First ensure the webhook is deleted
                 updater.bot.delete_webhook(drop_pending_updates=True)
-                # Use a longer timeout but avoid using both drop_pending_updates and clean together
-                updater.start_polling(timeout=30, drop_pending_updates=True)
+                logging.info("Webhook deleted and pending updates dropped")
+                
+                # Wait a moment for Telegram servers to process the webhook deletion
+                time.sleep(2)
+                
+                # Start with clean=True to reset the update_id counter
+                updater.start_polling(timeout=30, drop_pending_updates=True, clean=True)
                 logging.info("Bot started successfully")
                 break  # Exit the retry loop if successful
             except Conflict as ce:
@@ -1876,13 +1908,17 @@ def main():
                 if retry_count >= max_retries:
                     logging.error("Maximum retry attempts reached. Exiting.")
                     return
-                # Wait longer between retries
-                time.sleep(10)
+                # Exponential backoff between retries
+                backoff_time *= 1.5
+                logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt...")
+                time.sleep(backoff_time)
             except Exception as e:
                 logging.error(f"Failed to start bot: {e}")
                 # If we can't start polling, wait a bit and try again with more aggressive settings
                 retry_count += 1
-                time.sleep(5)
+                backoff_time *= 1.5
+                logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt...")
+                time.sleep(backoff_time)
                 if retry_count >= max_retries:
                     logging.error("Maximum retry attempts reached. Exiting.")
                     return
