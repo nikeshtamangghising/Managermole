@@ -188,12 +188,14 @@ def help_command(update: Update, context) -> None:
         "/stats - View statistics about your collected messages\n\n"
 
         "📊 <b>Export Options</b>:\n"
-        "/export_csv - Export results in a table format with Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, and Remaining Balance\n"
-        "  - You can manually enter deposit amounts, bank names, and remaining balance\n"
-        "  - You can append to existing CSV files for daily tracking\n"
-        "  - Previous day's remaining balance is automatically used as today's starting balance\n"
-        "  - Manually entered remaining balance takes precedence over previous day's balance\n"
-        "  - Automatically calculates running totals across multiple days\n"
+        "/export_csv - Export results in CSV format with two options:\n"
+        "  - Simple: Just amounts, charges, and running sums row by row\n"
+        "  - Detailed: Full format with Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, and Remaining Balance\n"
+        "    • You can manually enter deposit amounts, bank names, and remaining balance\n"
+        "    • You can append to existing CSV files for daily tracking\n"
+        "    • Previous day's remaining balance is automatically used as today's starting balance\n"
+        "    • Manually entered remaining balance takes precedence over previous day's balance\n"
+        "    • Automatically calculates running totals across multiple days\n"
         "/export_json - Export results as a JSON file\n\n"
 
         "🏦 <b>Banking Features</b>:\n"
@@ -648,7 +650,8 @@ def handle_conversation(update: Update, context) -> None:
                 "📝 Please enter the full path to your CSV file (e.g., C:\\Users\\YourName\\Documents\\my_file.csv):"
             )
         elif text == '2' or text.lower() in ['no', 'default', 'new']:
-            # Use default filename
+            # Use default filename (no CSV path)
+            user_states[user_id]['csv_path'] = None
             process_export_csv(update, context, use_manual_input=True)
         elif os.path.isfile(text) and text.lower().endswith('.csv'):
             # User provided a valid CSV path directly
@@ -678,18 +681,138 @@ def export_csv(update: Update, context) -> None:
         update.message.reply_text("❗ No messages collected yet. Forward some messages first.")
         return
     
-    # Ask user if they want to enter deposit information manually
+    # Ask user if they want to use simple export or detailed export
     keyboard = [
-        [InlineKeyboardButton("Yes, I'll enter details", callback_data='csv_manual_input')],
-        [InlineKeyboardButton("No, use extracted data only", callback_data='csv_auto_export')]
+        [InlineKeyboardButton("Simple Export", callback_data='csv_simple_export')],
+        [InlineKeyboardButton("Detailed Export", callback_data='csv_detailed_export')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     update.message.reply_text(
         "📊 CSV Export Options:\n\n"
-        "Do you want to manually enter deposit amount and bank name?",
+        "Choose your export format:\n"
+        "• Simple: Just amounts, charges, and running sums\n"
+        "• Detailed: Full format with bank details and balance",
         reply_markup=reply_markup
     )
+
+def export_simple_csv(update: Update, context) -> None:
+    """Export the results as a simple CSV file with just amounts, charges, and running sums."""
+    # Determine if this is called from a callback query or directly
+    if hasattr(update, 'callback_query'):
+        query = update.callback_query
+        user_id = query.from_user.id
+        message = query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
+
+    if user_id not in user_messages or not user_messages[user_id]:
+        message.reply_text("❗ No messages collected yet. Forward some messages first.")
+        return
+
+    # Get user preferences
+    preferences = user_preferences.get(user_id, DEFAULT_PREFERENCES.copy())
+    decimal_separator = preferences['decimal_separator']
+
+    # Create the appropriate pattern based on user preference
+    if decimal_separator == '.':
+        pattern = r'([€$£¥])?(\-?\d+(?:\.\d+)?)'
+    else:
+        pattern = r'([€$£¥])?(\-?\d+(?:,\d+)?)'
+
+    amounts = []  # Values > AMOUNT_THRESHOLD
+    charges = []  # Values ≤ AMOUNT_THRESHOLD
+    
+    # Process all collected messages
+    for message_data in user_messages[user_id]:
+        message_text = message_data['text']
+
+        # Find all matches in the message
+        matches = re.findall(pattern, message_text)
+
+        for match in matches:
+            currency, original_number, processed_number, value, has_decimal = extract_number_value(match, decimal_separator, message_text)
+
+            # Format the extracted value
+            extracted_value = f"{currency}{processed_number}" if currency and preferences['include_currency'] else processed_number
+
+            # Add to appropriate category
+            if value > AMOUNT_THRESHOLD:
+                amounts.append(extracted_value)
+            else:
+                charges.append(extracted_value)
+
+    if not amounts and not charges:
+        message.reply_text(
+            f"❗ I couldn't find any numbers in your collected messages."
+        )
+        return
+
+    # Create a new CSV file with a simple format
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    filename = os.path.join(current_dir, f"simple_export_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    
+    try:
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            
+            # Write header
+            writer.writerow(['Type', 'Value', 'Running Sum'])
+            
+            # Write amounts with running sum
+            running_sum = 0
+            for amount in amounts:
+                # Remove any currency symbol and convert to float
+                numeric_str = re.sub(r'[€$£¥]', '', amount)
+                # Handle both decimal separators
+                if decimal_separator == ',':
+                    numeric_str = numeric_str.replace(',', '.')
+                
+                try:
+                    value = float(numeric_str)
+                    running_sum += value
+                    writer.writerow(['Amount', amount, f"{running_sum:.2f}"])
+                except ValueError:
+                    # Skip if conversion fails
+                    writer.writerow(['Amount', amount, ''])
+            
+            # Write charges with running sum
+            for charge in charges:
+                # Remove any currency symbol and convert to float
+                numeric_str = re.sub(r'[€$£¥]', '', charge)
+                # Handle both decimal separators
+                if decimal_separator == ',':
+                    numeric_str = numeric_str.replace(',', '.')
+                
+                try:
+                    value = float(numeric_str)
+                    running_sum -= value  # Subtract charges from running sum
+                    writer.writerow(['Charge', charge, f"{running_sum:.2f}"])
+                except ValueError:
+                    # Skip if conversion fails
+                    writer.writerow(['Charge', charge, ''])
+            
+            # Write total row
+            writer.writerow(['', '', ''])
+            writer.writerow(['TOTAL', '', f"{running_sum:.2f}"])
+
+        # Send the file to the user
+        with open(filename, 'rb') as file:
+            message.reply_document(
+                document=file,
+                filename=os.path.basename(filename),
+                caption=f"📊 Simple CSV export with amounts, charges, and running sums.\n\nThe file includes:\n- Each amount and charge on its own row\n- Running sum calculated for each row\n- Final total at the bottom"
+            )
+
+        # Remove the temporary file
+        os.remove(filename)
+
+    except Exception as e:
+        logger.error(f"Error exporting simple CSV: {e}")
+        message.reply_text(
+            f"❗ Sorry, there was an error creating your CSV file: {str(e)}"
+        )
 
 def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Balance.
@@ -1164,6 +1287,24 @@ def button_callback(update: Update, context) -> None:
         user_preferences[user_id]['output_format'] = data[11:]
     elif data == 'toggle_silent':
         user_preferences[user_id]['silent_collection'] = not user_preferences[user_id]['silent_collection']
+    elif data == 'csv_simple_export':
+        # User wants a simple CSV with just amounts, charges and running sums
+        query.edit_message_text(text="Processing simple CSV export...")
+        export_simple_csv(update, context)
+        return
+    elif data == 'csv_detailed_export':
+        # User wants the detailed CSV export
+        keyboard = [
+            [InlineKeyboardButton("Yes, I'll enter details", callback_data='csv_manual_input')],
+            [InlineKeyboardButton("No, use extracted data only", callback_data='csv_auto_export')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        query.edit_message_text(
+            "Do you want to manually enter deposit amount and bank name?",
+            reply_markup=reply_markup
+        )
+        return
     elif data == 'csv_manual_input':
         # User wants to manually enter deposit information
         query.edit_message_text(text="Starting manual input process...")
@@ -1591,7 +1732,8 @@ def handle_conversation(update: Update, context) -> None:
                 "📝 Please enter the full path to your CSV file (e.g., C:\\Users\\YourName\\Documents\\my_file.csv):"
             )
         elif text == '2' or text.lower() in ['no', 'default', 'new']:
-            # Use default filename
+            # Use default filename (no CSV path)
+            user_states[user_id]['csv_path'] = None
             process_export_csv(update, context, use_manual_input=True)
         elif os.path.isfile(text) and text.lower().endswith('.csv'):
             # User provided a valid CSV path directly
