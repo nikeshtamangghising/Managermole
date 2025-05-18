@@ -128,7 +128,7 @@ def error_handler(update, context):
             # Wait a bit and try to recover
             time.sleep(15)  # Increased wait time further
             try:
-                # Try to restart polling with clean=True to avoid conflicts
+                # Try to restart polling to avoid conflicts
                 if hasattr(context, 'bot') and hasattr(context.bot, 'get_updates'):
                     # More aggressive cleanup
                     context.bot.delete_webhook(drop_pending_updates=True)
@@ -1898,8 +1898,8 @@ def main():
                 # Wait a moment for Telegram servers to process the webhook deletion
                 time.sleep(2)
                 
-                # Start with clean=True to reset the update_id counter
-                updater.start_polling(timeout=30, drop_pending_updates=True, clean=True)
+                # Start polling with drop_pending_updates to ignore old messages
+                updater.start_polling(timeout=30, drop_pending_updates=True)
                 logging.info("Bot started successfully")
                 break  # Exit the retry loop if successful
             except Conflict as ce:
