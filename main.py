@@ -5,9 +5,12 @@ import os
 import time
 import csv
 import json
+import socket
+import threading
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
+from telegram.error import Conflict, TelegramError, NetworkError
 
 # Import keep_alive function
 from keep_alive import keep_alive
@@ -112,6 +115,33 @@ user_bank_deposits = {}
 
 # Dictionary to store user-defined custom banks
 user_custom_banks = {}
+
+# Create a lock to ensure only one instance of the bot is running
+BOT_INSTANCE_LOCK = threading.Lock()
+
+# Function to handle errors
+def error_handler(update, context):
+    """Handle errors in the dispatcher."""
+    try:
+        if isinstance(context.error, Conflict):
+            logging.warning("Conflict error: Another instance of the bot is already running")
+            # Wait a bit and try to recover
+            time.sleep(5)
+            try:
+                # Try to restart polling with clean=True to avoid conflicts
+                if hasattr(context, 'bot') and hasattr(context.bot, 'get_updates'):
+                    context.bot.delete_webhook(drop_pending_updates=True)
+                    logging.info("Cleared webhook and pending updates")
+            except Exception as e:
+                logging.error(f"Failed to recover from conflict: {e}")
+        elif isinstance(context.error, NetworkError):
+            logging.error(f"Network error: {context.error}. Waiting before retry.")
+            time.sleep(10)
+        else:
+            logging.error(f"Update {update} caused error: {context.error}")
+    except Exception as e:
+        logging.error(f"Error in error handler: {e}")
+
 def start(update: Update, context) -> None:
     """Send a message when the command /start is issued."""
     user_id = update.effective_user.id
@@ -1483,40 +1513,89 @@ def handle_conversation(update: Update, context) -> None:
                 "❗ Invalid amount. Please enter a valid number for the limit amount:"
             )
 
+def create_socket_lock():
+    """Create a socket-based lock to ensure only one instance of the bot runs."""
+    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Use a specific port for locking - this will fail if another instance is running
+        # Use port 10001 to avoid conflicts with the web server
+        lock_socket.bind(('localhost', 10001))
+        logging.info("Successfully acquired lock - this is the only running instance")
+        return lock_socket
+    except socket.error:
+        logging.error("Failed to acquire lock - another instance is already running")
+        return None
+
 def main():
     """Start the bot."""
-    # Create the Updater and pass it your bot's token
-    updater = Updater(BOT_TOKEN)
-
-    # Get the dispatcher to register handlers
-    dp = updater.dispatcher
-
-    # Add command handlers
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("process", process_command))
-    dp.add_handler(CommandHandler("clear", clear_command))
-    dp.add_handler(CommandHandler("settings", settings_command))
-    dp.add_handler(CommandHandler("export_csv", export_csv))
-    dp.add_handler(CommandHandler("export_json", export_json))
-    dp.add_handler(CommandHandler("stats", stats_command))
-
-    # Add callback query handler
-    dp.add_handler(CallbackQueryHandler(button_callback))
+    # Try to acquire the lock to ensure only one instance runs
+    lock_socket = create_socket_lock()
+    if not lock_socket:
+        logging.error("Exiting because another instance is already running")
+        return
     
-    # Add message handler - handle conversation first, then regular message collection
-    # This ensures that messages during a conversation flow are handled correctly
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_conversation))
+    # Acquire thread lock as well for extra safety
+    if not BOT_INSTANCE_LOCK.acquire(blocking=False):
+        logging.error("Another instance is already running (thread lock)")
+        return
+    
+    try:
+        # Create the Updater and pass it your bot's token
+        updater = Updater(BOT_TOKEN)
 
-    # Keep the bot alive by starting the Flask server
-    keep_alive()
+        # Get the dispatcher to register handlers
+        dp = updater.dispatcher
 
-    # Start the Bot
-    updater.start_polling()
-    logging.info("Bot started successfully")
+        # Add command handlers
+        dp.add_handler(CommandHandler("start", start))
+        dp.add_handler(CommandHandler("help", help_command))
+        dp.add_handler(CommandHandler("process", process_command))
+        dp.add_handler(CommandHandler("clear", clear_command))
+        dp.add_handler(CommandHandler("settings", settings_command))
+        dp.add_handler(CommandHandler("export_csv", export_csv))
+        dp.add_handler(CommandHandler("export_json", export_json))
+        dp.add_handler(CommandHandler("stats", stats_command))
 
-    # Run the bot until you press Ctrl-C
-    updater.idle()
+        # Add callback query handler
+        dp.add_handler(CallbackQueryHandler(button_callback))
+        
+        # Add message handler - handle conversation first, then regular message collection
+        # This ensures that messages during a conversation flow are handled correctly
+        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_conversation))
+
+        # Add error handler for Conflict errors
+        dp.add_error_handler(error_handler)
+
+        # Keep the bot alive by starting the Flask server
+        keep_alive()
+
+        # Start the Bot with a higher allowed_updates interval to prevent conflicts
+        try:
+            # Use clean=True to ensure any previous webhook is removed
+            # Use drop_pending_updates=True to ignore updates that arrived while the bot was offline
+            updater.start_polling(drop_pending_updates=True, clean=True)
+            logging.info("Bot started successfully")
+        except Exception as e:
+            logging.error(f"Failed to start bot: {e}")
+            # If we can't start polling, wait a bit and try again with more aggressive settings
+            time.sleep(5)
+            try:
+                # Try with more aggressive settings to avoid conflicts
+                updater.bot.delete_webhook(drop_pending_updates=True)
+                updater.start_polling(timeout=30, drop_pending_updates=True, clean=True)
+                logging.info("Bot started successfully after retry")
+            except Exception as retry_e:
+                logging.error(f"Failed to start bot after retry: {retry_e}")
+                raise
+
+        # Run the bot until you press Ctrl-C
+        updater.idle()
+    finally:
+        # Release the lock when the bot is shutting down
+        if BOT_INSTANCE_LOCK.locked():
+            BOT_INSTANCE_LOCK.release()
+        if lock_socket:
+            lock_socket.close()
 
 if __name__ == '__main__':
     main()

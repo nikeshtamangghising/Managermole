@@ -136,7 +136,15 @@ def health():
     }
 
 def run():
+    # Use a different port than the one used for the socket lock in main.py
+    # The socket lock uses port 10000, so we'll use a different port for Flask
     port = int(os.getenv('PORT', 8080))
+    # If the environment doesn't specify a port and we're on Render,
+    # make sure we don't use port 10001 which is used for the socket lock
+    if port == 10001 and not os.getenv('PORT'):
+        port = 8080
+        logging.info(f"Changed Flask port to {port} to avoid conflict with socket lock")
+    
     app.run(
         host='0.0.0.0',
         port=port,
