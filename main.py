@@ -126,21 +126,31 @@ def error_handler(update, context):
         if isinstance(context.error, Conflict):
             logging.warning("Conflict error: Another instance of the bot is already running")
             # Wait a bit and try to recover
-            time.sleep(5)
+            time.sleep(10)  # Increased wait time
             try:
                 # Try to restart polling with clean=True to avoid conflicts
                 if hasattr(context, 'bot') and hasattr(context.bot, 'get_updates'):
+                    # More aggressive cleanup
                     context.bot.delete_webhook(drop_pending_updates=True)
-                    logging.info("Cleared webhook and pending updates")
+                    # Force a clean state
+                    if hasattr(context.dispatcher, '_update_fetcher'):
+                        if hasattr(context.dispatcher._update_fetcher, '_last_update_id'):
+                            context.dispatcher._update_fetcher._last_update_id = 0
+                    logging.info("Cleared webhook, pending updates, and reset update ID")
             except Exception as e:
                 logging.error(f"Failed to recover from conflict: {e}")
         elif isinstance(context.error, NetworkError):
             logging.error(f"Network error: {context.error}. Waiting before retry.")
-            time.sleep(10)
+            time.sleep(15)  # Increased wait time for network errors
         else:
-            logging.error(f"Update {update} caused error: {context.error}")
+            # Get update information safely
+            update_str = str(update) if update else "None"
+            logging.error(f"Update {update_str} caused error: {context.error}")
     except Exception as e:
         logging.error(f"Error in error handler: {e}")
+        # Log the full traceback for better debugging
+        import traceback
+        logging.error(traceback.format_exc())
 
 def start(update: Update, context) -> None:
     """Send a message when the command /start is issued."""
@@ -178,10 +188,11 @@ def help_command(update: Update, context) -> None:
         "/stats - View statistics about your collected messages\n\n"
 
         "📊 <b>Export Options</b>:\n"
-        "/export_csv - Export results in a table format with Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, and Balance\n"
-        "  - You can manually enter deposit amounts and bank names\n"
+        "/export_csv - Export results in a table format with Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, and Remaining Balance\n"
+        "  - You can manually enter deposit amounts, bank names, and remaining balance\n"
         "  - You can append to existing CSV files for daily tracking\n"
         "  - Previous day's remaining balance is automatically used as today's starting balance\n"
+        "  - Manually entered remaining balance takes precedence over previous day's balance\n"
         "  - Automatically calculates running totals across multiple days\n"
         "/export_json - Export results as a JSON file\n\n"
 
@@ -465,15 +476,65 @@ user_csv_files = {}
 user_states = {}
 
 def ask_for_deposit_info(update: Update, context) -> None:
-    """Ask the user for deposit amount and bank name."""
+    """Ask the user for deposit amount, bank name, and remaining balance."""
     user_id = update.effective_user.id
     
-    # Set the state to waiting for deposit amount
-    user_states[user_id] = {'state': 'waiting_for_deposit_amount'}
+    # Initialize user state for CSV export
+    user_states[user_id] = {
+        'state': 'waiting_for_deposit_amount',
+        'action': 'csv_export',
+        'remaining_balance': None  # Will store the manually entered remaining balance
+    }
     
-    update.message.reply_text(
-        "📝 Please enter the deposit amount (just the number):"
-    )
+    # Create a keyboard with Nepali banks and user's custom banks
+    keyboard = []
+    row = []
+    
+    # Add default Nepali banks
+    for i, bank in enumerate(NEPAL_BANKS):
+        if i % 2 == 0 and i > 0:
+            keyboard.append(row)
+            row = []
+        row.append(InlineKeyboardButton(bank, callback_data=f"select_bank_{i}"))
+    
+    # Add user's custom banks if any
+    if user_id in user_custom_banks and user_custom_banks[user_id]:
+        # Add a separator row if there are default banks
+        if row:
+            keyboard.append(row)
+            row = []
+        
+        # Add a header for custom banks
+        keyboard.append([InlineKeyboardButton("--- Your Custom Banks ---", callback_data="custom_bank_header")])
+        
+        # Add custom banks
+        for i, bank in enumerate(user_custom_banks[user_id]):
+            if i % 2 == 0 and i > 0:
+                keyboard.append(row)
+                row = []
+            # Use a different prefix for custom banks to distinguish them
+            row.append(InlineKeyboardButton(bank, callback_data=f"select_custom_bank_{i}"))
+    
+    # Add option to enter a different bank name
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("Enter a different bank name", callback_data="enter_different_bank")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # If this is from a callback query, use edit_message_text
+    if hasattr(update, 'callback_query'):
+        update.callback_query.edit_message_text(
+            text="🏦 Please select a bank or enter a different bank name:",
+            reply_markup=reply_markup
+        )
+    else:
+        # Otherwise, send a new message
+        update.message.reply_text(
+            "🏦 Please select a bank or enter a different bank name:",
+            reply_markup=reply_markup
+        )
+
 
 def handle_conversation(update: Update, context) -> None:
     """Handle the conversation flow for collecting deposit information."""
@@ -545,16 +606,40 @@ def handle_conversation(update: Update, context) -> None:
     elif state == 'waiting_for_bank_name':
         # Store the bank name
         user_states[user_id]['bank_name'] = text
-        user_states[user_id]['state'] = 'waiting_for_csv_path'
+        user_states[user_id]['state'] = 'waiting_for_remaining_balance'
         
-        # Ask for CSV file path or use default
+        # Ask for remaining balance
         update.message.reply_text(
             f"✅ Bank name recorded: {text}\n\n"
-            f"📝 Do you want to append to an existing CSV file?\n"
-            f"1. Yes - I'll provide the file path\n"
-            f"2. No - Create a new file (default)\n\n"
-            f"Please reply with '1' or '2', or enter the full path to your CSV file:"
+            f"📝 Now, please enter the remaining balance (or type '0' if none):"
         )
+    
+    elif state == 'waiting_for_remaining_balance':
+        # Try to parse the remaining balance
+        try:
+            # Remove any currency symbols and convert to float
+            numeric_str = re.sub(r'[€$£¥]', '', text)
+            # Handle both decimal separators
+            if ',' in numeric_str and '.' not in numeric_str:
+                numeric_str = numeric_str.replace(',', '.')
+            
+            remaining_balance = float(numeric_str)
+            user_states[user_id]['remaining_balance'] = remaining_balance
+            user_states[user_id]['state'] = 'waiting_for_csv_path'
+            
+            # Ask for CSV file path or use default
+            update.message.reply_text(
+                f"✅ Remaining balance recorded: {remaining_balance}\n\n"
+                f"📝 Do you want to append to an existing CSV file?\n"
+                f"1. Yes - I'll provide the file path\n"
+                f"2. No - Create a new file (default)\n\n"
+                f"Please reply with '1' or '2', or enter the full path to your CSV file:"
+            )
+        except ValueError:
+            update.message.reply_text(
+                "❗ Invalid number format. Please enter a valid number for the remaining balance:"
+            )
+            return
     
     elif state == 'waiting_for_csv_path':
         if text == '1':
@@ -643,6 +728,7 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
         deposit_amount = user_states[user_id].get('deposit_amount')
         bank_name = user_states[user_id].get('bank_name')
         csv_path = user_states[user_id].get('csv_path')
+        manual_remaining_balance = user_states[user_id].get('remaining_balance')
         
         # Format the deposit amount
         if deposit_amount is not None:
@@ -652,9 +738,16 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     else:
         bank_name = "Remaining Balance"  # Default bank name
         csv_path = None
+        manual_remaining_balance = None
         
     # Variable to store previous day's balance
     previous_balance = 0.0
+    
+    # If user manually entered a remaining balance, use it instead of reading from file
+    if manual_remaining_balance is not None:
+        previous_balance = manual_remaining_balance
+        logger.info(f"Using manually entered remaining balance: {previous_balance}")
+    
 
     # Process all collected messages if not using manual input exclusively
     if not use_manual_input or not amounts:
@@ -728,7 +821,9 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
         user_csv_files[user_id] = csv_path
     else:
         # Create a new CSV file with the requested format
-        filename = f"decimal_stripper_export_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        # Make sure to use an absolute path for the new file
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        filename = os.path.join(current_dir, f"decimal_stripper_export_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         file_exists = False
         # Store the path for future use
         user_csv_files[user_id] = filename
@@ -766,8 +861,12 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             # If we have a previous balance, handle it appropriately
             if previous_balance > 0:
                 if use_manual_input and amounts:
-                    # If user manually entered a deposit, inform them about the previous balance
-                    message.reply_text(f"Note: Previous day's remaining balance was {previous_balance}. This will be included in your total calculations.")
+                    # If user manually entered a deposit and remaining balance, inform them
+                    if user_id in user_states and user_states[user_id].get('remaining_balance') is not None:
+                        message.reply_text(f"Note: Using your manually entered remaining balance of {previous_balance}. This will be included in your total calculations.")
+                    else:
+                        # Using previous balance from file
+                        message.reply_text(f"Note: Previous day's remaining balance was {previous_balance}. This will be included in your total calculations.")
                 else:
                     # Add previous balance as the first amount if no manual deposit was specified
                     amounts = [str(previous_balance)] + amounts
@@ -799,8 +898,10 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             
             # Write header if creating a new file
             if not file_exists:
-                fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Total Deposit', 'Total Paid', 'Balance']
+                fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Total Deposit', 'Total Paid', 'Remaining Balance']
                 writer.writerow(fieldnames)
+                # Add a separator row for better readability
+                writer.writerow(['---', '---', '---', '---', '---', '---', '---'])
             
             # Format the deposit amount with two decimal places if it's a number
             deposit_amount_formatted = ''
@@ -847,8 +948,11 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             total_paid_formatted = f"{total_paid:.2f}"
             balance_formatted = f"{balance:.2f}"
             
+            # Add a separator row before totals for better readability
+            writer.writerow(['---', '---', '---', '---', '---', '---', '---'])
+            
             # Write the totals row at the bottom with proper labels
-            totals_row = ['', '', '', 'Total', total_deposit_formatted, total_paid_formatted, balance_formatted]
+            totals_row = ['', 'SUMMARY', '', 'TOTALS:', total_deposit_formatted, total_paid_formatted, balance_formatted]
             writer.writerow(totals_row)
 
         # Send the file to the user
@@ -856,7 +960,7 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             message.reply_document(
                 document=file,
                 filename=os.path.basename(filename),
-                caption=f"📊 CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Balance.\n\nThe file includes:\n- Deposit information in the first row\n- Individual payments in the Paid To Host column\n- Running totals at the bottom\n- Previous day's remaining balance is automatically used as today's starting balance."
+                caption=f"📊 CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Remaining Balance.\n\nThe file includes:\n- Deposit information in the first row\n- Individual payments in the Paid To Host column\n- Running totals at the bottom\n- Your manually entered remaining balance or previous day's balance is included in calculations\n- Improved formatting for better readability"
             )
 
         # Don't remove the file if it's a user-specified path
@@ -1111,6 +1215,17 @@ def button_callback(update: Update, context) -> None:
         elif user_states[user_id].get('action') == 'limit_check':
             query.edit_message_text(text=f"Selected bank: {selected_bank}\n\nPlease enter the limit amount for this bank:")
             user_states[user_id]['state'] = 'waiting_for_limit_amount'
+        elif user_states[user_id].get('action') == 'csv_export':
+            # For CSV export, store the bank name and ask for deposit amount
+            user_states[user_id]['bank_name'] = selected_bank
+            query.edit_message_text(text=f"Selected bank: {selected_bank}\n\nPlease enter the deposit amount:")
+            user_states[user_id]['state'] = 'waiting_for_deposit_amount'
+        return
+        
+    elif data == 'enter_different_bank':
+        # User wants to enter a custom bank name for this transaction
+        query.edit_message_text(text="Please enter the bank name in your next message:")
+        user_states[user_id]['state'] = 'waiting_for_bank_name'
         return
 
     # Get updated preferences
@@ -1434,16 +1549,40 @@ def handle_conversation(update: Update, context) -> None:
     elif state == 'waiting_for_bank_name':
         # Store the bank name
         user_states[user_id]['bank_name'] = text
-        user_states[user_id]['state'] = 'waiting_for_csv_path'
+        user_states[user_id]['state'] = 'waiting_for_remaining_balance'
         
-        # Ask for CSV file path or use default
+        # Ask for remaining balance
         update.message.reply_text(
             f"✅ Bank name recorded: {text}\n\n"
-            f"📝 Do you want to append to an existing CSV file?\n"
-            f"1. Yes - I'll provide the file path\n"
-            f"2. No - Create a new file (default)\n\n"
-            f"Please reply with '1' or '2', or enter the full path to your CSV file:"
+            f"📝 Now, please enter the remaining balance (or type '0' if none):"
         )
+    
+    elif state == 'waiting_for_remaining_balance':
+        # Try to parse the remaining balance
+        try:
+            # Remove any currency symbols and convert to float
+            numeric_str = re.sub(r'[€$£¥]', '', text)
+            # Handle both decimal separators
+            if ',' in numeric_str and '.' not in numeric_str:
+                numeric_str = numeric_str.replace(',', '.')
+            
+            remaining_balance = float(numeric_str)
+            user_states[user_id]['remaining_balance'] = remaining_balance
+            user_states[user_id]['state'] = 'waiting_for_csv_path'
+            
+            # Ask for CSV file path or use default
+            update.message.reply_text(
+                f"✅ Remaining balance recorded: {remaining_balance}\n\n"
+                f"📝 Do you want to append to an existing CSV file?\n"
+                f"1. Yes - I'll provide the file path\n"
+                f"2. No - Create a new file (default)\n\n"
+                f"Please reply with '1' or '2', or enter the full path to your CSV file:"
+            )
+        except ValueError:
+            update.message.reply_text(
+                "❗ Invalid number format. Please enter a valid number for the remaining balance:"
+            )
+            return
     
     elif state == 'waiting_for_csv_path':
         if text == '1':
@@ -1520,10 +1659,12 @@ def create_socket_lock():
         # Use a specific port for locking - this will fail if another instance is running
         # Use port 10001 to avoid conflicts with the web server
         lock_socket.bind(('localhost', 10001))
+        # Set socket options to reuse the address and port
+        lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         logging.info("Successfully acquired lock - this is the only running instance")
         return lock_socket
-    except socket.error:
-        logging.error("Failed to acquire lock - another instance is already running")
+    except socket.error as e:
+        logging.error(f"Failed to acquire lock - another instance is already running: {e}")
         return None
 
 def main():
@@ -1537,6 +1678,9 @@ def main():
     # Acquire thread lock as well for extra safety
     if not BOT_INSTANCE_LOCK.acquire(blocking=False):
         logging.error("Another instance is already running (thread lock)")
+        # Close the socket lock since we couldn't acquire the thread lock
+        if lock_socket:
+            lock_socket.close()
         return
     
     try:
@@ -1567,25 +1711,39 @@ def main():
         dp.add_error_handler(error_handler)
 
         # Keep the bot alive by starting the Flask server
-        keep_alive()
+        # Continue even if keep_alive fails
+        keep_alive_success = keep_alive()
+        if not keep_alive_success:
+            logging.warning("Keep alive server failed to start, but continuing with bot operation")
 
         # Start the Bot with a higher allowed_updates interval to prevent conflicts
-        try:
-            # Use drop_pending_updates=True to ignore updates that arrived while the bot was offline
-            updater.start_polling(drop_pending_updates=True)
-            logging.info("Bot started successfully")
-        except Exception as e:
-            logging.error(f"Failed to start bot: {e}")
-            # If we can't start polling, wait a bit and try again with more aggressive settings
-            time.sleep(5)
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
             try:
-                # Try with more aggressive settings to avoid conflicts
+                # Clear any pending updates and delete webhook to avoid conflicts
                 updater.bot.delete_webhook(drop_pending_updates=True)
-                updater.start_polling(timeout=30, drop_pending_updates=True)
-                logging.info("Bot started successfully after retry")
-            except Exception as retry_e:
-                logging.error(f"Failed to start bot after retry: {retry_e}")
-                raise
+                # Use a longer timeout and drop_pending_updates to avoid conflicts
+                updater.start_polling(timeout=30, drop_pending_updates=True, clean=True)
+                logging.info("Bot started successfully")
+                break  # Exit the retry loop if successful
+            except Conflict as ce:
+                retry_count += 1
+                logging.error(f"Conflict error on attempt {retry_count}/{max_retries}: {ce}")
+                if retry_count >= max_retries:
+                    logging.error("Maximum retry attempts reached. Exiting.")
+                    return
+                # Wait longer between retries
+                time.sleep(10)
+            except Exception as e:
+                logging.error(f"Failed to start bot: {e}")
+                # If we can't start polling, wait a bit and try again with more aggressive settings
+                retry_count += 1
+                time.sleep(5)
+                if retry_count >= max_retries:
+                    logging.error("Maximum retry attempts reached. Exiting.")
+                    return
 
         # Run the bot until you press Ctrl-C
         updater.idle()

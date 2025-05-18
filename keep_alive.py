@@ -137,11 +137,11 @@ def health():
 
 def run():
     # Use a different port than the one used for the socket lock in main.py
-    # The socket lock uses port 10000, so we'll use a different port for Flask
+    # The socket lock uses port 10001, so we'll use a different port for Flask
     port = int(os.getenv('PORT', 8080))
-    # If the environment doesn't specify a port and we're on Render,
-    # make sure we don't use port 10001 which is used for the socket lock
-    if port == 10001 and not os.getenv('PORT'):
+    
+    # Always avoid using port 10001 which is used for the socket lock
+    if port == 10001:
         port = 8080
         logging.info(f"Changed Flask port to {port} to avoid conflict with socket lock")
     
@@ -180,6 +180,10 @@ def keep_alive():
         t.start()
         logging.info("Keep alive server started successfully")
         
+        # Wait a moment to ensure the Flask server is fully initialized
+        # This helps prevent race conditions with the bot polling
+        time.sleep(2)
+        
         # Start the self-ping thread
         ping_thread = Thread(target=self_ping)
         ping_thread.daemon = True
@@ -191,8 +195,12 @@ def keep_alive():
         render_url = os.getenv('RENDER_EXTERNAL_URL', f"http://0.0.0.0:{port}")
         logging.info(f"Dashboard available at: {render_url}")
         logging.info(f"Health endpoint: {render_url}/health")
-        port = int(os.getenv('PORT', 8080))
         logging.info(f"Server can be monitored at: http://0.0.0.0:{port} or your Replit URL")
     except Exception as e:
         logging.error(f"Failed to start keep alive server: {e}")
-        raise
+        # Don't raise the exception, just log it
+        # This prevents the keep_alive failure from stopping the bot
+        logging.warning("Continuing without keep alive server")
+        return False
+    
+    return True
