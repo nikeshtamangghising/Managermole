@@ -827,18 +827,21 @@ def handle_conversation(update: Update, context) -> None:
                 })
                 user_states[user_id]['total_deposits'] += remaining_balance
             
-            # Now show bank selection for deposit entry with improved message
+            # Step 2: Ask user to choose between manual entry and extracted data
+            keyboard = [
+                [InlineKeyboardButton("Enter deposit amount & bank manually", callback_data='csv_manual_input')],
+                [InlineKeyboardButton("Use extracted data only", callback_data='csv_auto_export')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             update.message.reply_text(
-                f"✅ <b>Remaining balance recorded: {remaining_balance:.2f}</b>\n\n"
-                f"This will be used as your starting balance.\n\n"
-                f"Now, please select a bank for your deposit or click Done when finished:",
+                f"✅ <b>Step 1 Complete: Remaining balance recorded: {remaining_balance:.2f}</b>\n\n"
+                f"<b>Step 2: How would you like to enter deposit information?</b>\n\n"
+                f"• <b>Enter manually</b>: You'll select banks and enter deposit amounts for each bank\n"
+                f"• <b>Use extracted data</b>: I'll use the numbers from your collected messages",
+                reply_markup=reply_markup,
                 parse_mode='HTML'
             )
-            # Use the version with Done button instead of regular bank selection
-            if user_states[user_id].get('action') == 'deposit_entry':
-                show_bank_selection_with_done(update, context)
-            else:
-                show_bank_selection(update, context)
         except ValueError:
             update.message.reply_text(
                 "❗ Invalid number format. Please enter a valid number for the remaining balance:"
@@ -886,11 +889,11 @@ def handle_conversation(update: Update, context) -> None:
             deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
             
             update.message.reply_text(
-                f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
+                f"✅ <b>Step 4 Complete: Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
                 f"<b>Current deposits:</b>\n{deposits_summary}\n\n"
                 f"<b>Running total:</b> {user_states[user_id]['total_deposits']:.2f}\n"
                 f"<b>Current balance:</b> {current_balance:.2f}\n\n"
-                f"Would you like to add another bank deposit or finish and export the CSV?",
+                f"<b>Step 5: Would you like to add another bank deposit or finish?</b>",
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
@@ -919,11 +922,18 @@ def handle_conversation(update: Update, context) -> None:
         if text == '1':
             user_states[user_id]['state'] = 'waiting_for_csv_path_input'
             update.message.reply_text(
-                "📝 Please enter the full path to your CSV file (e.g., C:\\Users\\YourName\\Documents\\my_file.csv):"
+                "<b>Step 7: Provide existing CSV file path</b>\n\n"
+                "📝 Please enter the full path to your CSV file (e.g., C:\\Users\\YourName\\Documents\\my_file.csv):",
+                parse_mode='HTML'
             )
         elif text == '2' or text.lower() in ['no', 'default', 'new']:
             # Use default filename (no CSV path)
             user_states[user_id]['csv_path'] = None
+            update.message.reply_text(
+                "<b>Step 7: Creating new CSV file</b>\n\n"
+                "📊 Creating a new CSV file with your deposit information...",
+                parse_mode='HTML'
+            )
             # Make sure we're using the message object, not the update directly
             if hasattr(update, 'callback_query'):
                 # If this was triggered from a callback query
@@ -941,6 +951,11 @@ def handle_conversation(update: Update, context) -> None:
         elif os.path.isfile(text) and text.lower().endswith('.csv'):
             # User provided a valid CSV path directly
             user_states[user_id]['csv_path'] = text
+            update.message.reply_text(
+                f"<b>Step 7: Appending to existing CSV file</b>\n\n"
+                f"📊 Appending to your existing CSV file at:\n{text}",
+                parse_mode='HTML'
+            )
             try:
                 process_export_csv(update, context, use_manual_input=True)
             except Exception as e:
@@ -959,6 +974,11 @@ def handle_conversation(update: Update, context) -> None:
     elif state == 'waiting_for_csv_path_input':
         if os.path.isfile(text) and text.lower().endswith('.csv'):
             user_states[user_id]['csv_path'] = text
+            update.message.reply_text(
+                f"<b>Step 7: Appending to existing CSV file</b>\n\n"
+                f"📊 Appending to your existing CSV file at:\n{text}",
+                parse_mode='HTML'
+            )
             process_export_csv(update, context, use_manual_input=True)
         else:
             update.message.reply_text(
@@ -1682,23 +1702,39 @@ def button_callback(update: Update, context) -> None:
         export_simple_csv(update, context)
         return
     elif data == 'csv_detailed_export':
-        # User wants the detailed CSV export
-        keyboard = [
-            [InlineKeyboardButton("Yes, I'll enter details", callback_data='csv_manual_input')],
-            [InlineKeyboardButton("No, use extracted data only", callback_data='csv_auto_export')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # User wants the detailed CSV export - Step 1: Ask for remaining balance
+        # Initialize user state for CSV export with enhanced structure
+        user_states[user_id] = {
+            'state': 'waiting_for_remaining_balance',
+            'action': 'csv_export',
+            'remaining_balance': None,  # Will store the manually entered remaining balance
+            'bank_deposits': [],  # Will store multiple bank deposits for the same day
+            'current_bank': None,  # Will store the currently selected bank
+            'csv_path': None,  # Will store the CSV file path if appending to existing file
+            'total_deposits': 0.0,  # Will track the running total of deposits
+            'total_paid': 0.0  # Will track the running total of payments
+        }
         
-        query.edit_message_text(
-            "Do you want to manually enter deposit amount and bank name?",
-            reply_markup=reply_markup
+        # Step 1: Ask for remaining balance with improved instructions
+        message_text = (
+            "💰 <b>Step 1: Please enter your remaining balance:</b>\n\n"
+            "This will be used as the starting balance for your report and included in calculations. "
+            "If you're continuing from a previous report, this should be your current balance.\n\n"
+            "Enter 0 if you don't want to include a remaining balance."
         )
+        
+        query.edit_message_text(text=message_text, parse_mode='HTML')
         return
     elif data == 'csv_manual_input':
-        # User wants to manually enter deposit information
-        query.edit_message_text(text="Starting manual input process...")
-        # Start the conversation flow for manual input
-        ask_for_deposit_info(update, context)
+        # Step 3: Show bank selection for deposit entry
+        query.edit_message_text(
+            "<b>Step 3: Please select a bank for your deposit:</b>\n\n"
+            "Choose a bank from the list below. After selecting a bank, you'll be asked to enter the deposit amount.\n\n"
+            "You can select multiple banks one by one. When you're done adding all banks, click 'Finish and Export CSV'.",
+            parse_mode='HTML'
+        )
+        # Show bank selection with a Done button
+        show_bank_selection_with_done(update, context)
         return
     elif data == 'csv_auto_export':
         # User wants to use only extracted data
@@ -1706,16 +1742,24 @@ def button_callback(update: Update, context) -> None:
         process_export_csv(update, context, use_manual_input=False)
         return
     elif data == 'add_another_bank':
-        # User wants to add another bank deposit
-        show_bank_selection(update, context)
+        # Step 5: User wants to add another bank deposit
+        query.edit_message_text(
+            "<b>Step 5: Add another bank deposit</b>\n\n"
+            "You can select another bank to add more deposits, or click 'Finish and Export CSV' when you've finished adding all your bank deposits.",
+            parse_mode='HTML'
+        )
+        show_bank_selection_with_done(update, context)
         return
     elif data == 'finish_csv_export':
-        # User wants to finish and export CSV
+        # Step 6: User wants to finish and export CSV - Ask about file creation/append
         query.edit_message_text(
-            "📝 Do you want to append to an existing CSV file?\n\n"
-            "1. Yes - I'll provide the file path\n"
+            "<b>Step 6: Choose file option</b>\n\n"
+            "📝 Do you want to append to an existing CSV file or create a new one?\n\n"
+            "1. Yes - I'll provide the file path to append to\n"
             "2. No - Create a new file (default)\n\n"
-            "Please reply with '1' or '2', or enter the full path to your CSV file:"
+            "Please reply with '1' or '2', or enter the full path to your CSV file.\n\n"
+            "<b>Note:</b> This will be the final step before generating your well-managed CSV file with all your bank deposits and transaction details.",
+            parse_mode='HTML'
         )
         
         # Update state
@@ -1794,9 +1838,13 @@ def button_callback(update: Update, context) -> None:
             query.edit_message_text(text=f"Selected bank: {selected_bank}\n\nPlease enter the limit amount for this bank:")
             user_states[user_id]['state'] = 'waiting_for_limit_amount'
         elif user_states[user_id].get('action') == 'csv_export':
-            # For CSV export, store the bank name and ask for deposit amount
-            user_states[user_id]['bank_name'] = selected_bank
-            query.edit_message_text(text=f"Selected bank: {selected_bank}\n\nPlease enter the deposit amount:")
+            # Step 4: For CSV export, store the bank name and ask for deposit amount
+            user_states[user_id]['current_bank'] = selected_bank
+            query.edit_message_text(
+                f"<b>Step 4: Enter deposit amount for {selected_bank}</b>\n\n"
+                f"Please enter the deposit amount for this bank:",
+                parse_mode='HTML'
+            )
             user_states[user_id]['state'] = 'waiting_for_deposit_amount'
         return
         
@@ -1920,6 +1968,103 @@ def stats_command(update: Update, context) -> None:
     )
 
     update.message.reply_text(stats_message, parse_mode='HTML')
+
+def show_bank_selection_with_done(update: Update, context) -> None:
+    """Show a keyboard with bank selection options and a Done button."""
+    # Determine if this is called from a callback query or directly
+    if hasattr(update, 'callback_query') and update.callback_query is not None:
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
+    
+    # Create a keyboard with Nepali banks and user's custom banks
+    keyboard = []
+    
+    # Add a header row for better organization
+    keyboard.append([InlineKeyboardButton("🏦 SELECT A BANK FOR YOUR DEPOSIT 🏦", callback_data="header_no_action")])
+    
+    # Add user's previous selections first if they exist (for CSV export)
+    previous_banks = []
+    if user_id in user_states and 'bank_deposits' in user_states[user_id]:
+        for deposit in user_states[user_id]['bank_deposits']:
+            if deposit['bank'] != 'Previous Balance' and deposit['bank'] not in previous_banks:
+                previous_banks.append(deposit['bank'])
+    
+    if previous_banks:
+        keyboard.append([InlineKeyboardButton("✅ RECENTLY USED BANKS", callback_data="header_no_action")])
+        for bank in previous_banks:
+            bank_index = NEPAL_BANKS.index(bank) if bank in NEPAL_BANKS else -1
+            if bank_index >= 0:
+                callback_data = f"select_bank_{bank_index}"
+            else:
+                # Must be a custom bank
+                custom_index = user_custom_banks.get(user_id, []).index(bank) if bank in user_custom_banks.get(user_id, []) else -1
+                callback_data = f"select_custom_bank_{custom_index}" if custom_index >= 0 else "enter_different_bank"
+            
+            keyboard.append([InlineKeyboardButton(f"🔄 {bank}", callback_data=callback_data)])
+    
+    # Add a separator
+    keyboard.append([InlineKeyboardButton("───────── NEPAL BANKS ─────────", callback_data="header_no_action")])
+    
+    # Add default Nepali banks in a more organized way (3 per row)
+    for i in range(0, len(NEPAL_BANKS), 3):
+        row = []
+        for j in range(3):
+            if i + j < len(NEPAL_BANKS):
+                bank = NEPAL_BANKS[i + j]
+                row.append(InlineKeyboardButton(bank, callback_data=f"select_bank_{i + j}"))
+        keyboard.append(row)
+    
+    # Add user's custom banks if any
+    if user_id in user_custom_banks and user_custom_banks[user_id]:
+        # Add a header for custom banks
+        keyboard.append([InlineKeyboardButton("───────── YOUR CUSTOM BANKS ─────────", callback_data="custom_bank_header")])
+        
+        # Add custom banks (3 per row)
+        for i in range(0, len(user_custom_banks[user_id]), 3):
+            row = []
+            for j in range(3):
+                if i + j < len(user_custom_banks[user_id]):
+                    bank = user_custom_banks[user_id][i + j]
+                    # Use a different prefix for custom banks to distinguish them
+                    row.append(InlineKeyboardButton(f"🔶 {bank}", callback_data=f"select_custom_bank_{i + j}"))
+            keyboard.append(row)
+    
+    # Add option to enter a different bank
+    keyboard.append([InlineKeyboardButton("Enter Different Bank", callback_data="enter_different_bank")])
+    
+    # Get summary of deposits so far
+    deposits_text = ""
+    if user_id in user_states and 'bank_deposits' in user_states[user_id] and user_states[user_id]['bank_deposits']:
+        deposits = user_states[user_id]['bank_deposits']
+        deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in deposits])
+        deposits_text = f"\n\n<b>Current deposits:</b>\n{deposits_summary}\n\n<b>Total:</b> {user_states[user_id].get('total_deposits', 0):.2f}"
+    
+    # Add a Done button to exit the bank selection process
+    keyboard.append([InlineKeyboardButton("✅ Finish and Export CSV", callback_data="finish_csv_export")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # If this is from a callback query, use edit_message_text
+    if hasattr(update, 'callback_query') and update.callback_query is not None:
+        update.callback_query.edit_message_text(
+            f"<b>Step 3: Select a bank for your deposit</b>\n\n"
+            f"Choose a bank from the list below. After selecting a bank, you'll be asked to enter the deposit amount.{deposits_text}\n\n"
+            f"When you've finished adding all your bank deposits, click 'Finish and Export CSV'.",
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+    else:
+        # Otherwise, send a new message
+        message.reply_text(
+            f"<b>Step 3: Select a bank for your deposit</b>\n\n"
+            f"Choose a bank from the list below. After selecting a bank, you'll be asked to enter the deposit amount.{deposits_text}\n\n"
+            f"When you've finished adding all your bank deposits, click 'Finish and Export CSV'.",
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
 
 def start_bank_deposit_entry(update: Update, context) -> None:
     """Start the process of entering a bank deposit manually."""
@@ -2200,18 +2345,21 @@ def handle_conversation(update: Update, context) -> None:
                 })
                 user_states[user_id]['total_deposits'] += remaining_balance
             
-            # Now show bank selection for deposit entry with improved message
+            # Step 2: Ask user to choose between manual entry and extracted data
+            keyboard = [
+                [InlineKeyboardButton("Enter deposit amount & bank manually", callback_data='csv_manual_input')],
+                [InlineKeyboardButton("Use extracted data only", callback_data='csv_auto_export')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             update.message.reply_text(
-                f"✅ <b>Remaining balance recorded: {remaining_balance:.2f}</b>\n\n"
-                f"This will be used as your starting balance.\n\n"
-                f"Now, please select a bank for your deposit or click Done when finished:",
+                f"✅ <b>Step 1 Complete: Remaining balance recorded: {remaining_balance:.2f}</b>\n\n"
+                f"<b>Step 2: How would you like to enter deposit information?</b>\n\n"
+                f"• <b>Enter manually</b>: You'll select banks and enter deposit amounts for each bank\n"
+                f"• <b>Use extracted data</b>: I'll use the numbers from your collected messages",
+                reply_markup=reply_markup,
                 parse_mode='HTML'
             )
-            # Use the version with Done button instead of regular bank selection
-            if user_states[user_id].get('action') == 'deposit_entry':
-                show_bank_selection_with_done(update, context)
-            else:
-                show_bank_selection(update, context)
         except ValueError:
             update.message.reply_text(
                 "❗ Invalid number format. Please enter a valid number for the remaining balance:"
@@ -2259,11 +2407,11 @@ def handle_conversation(update: Update, context) -> None:
             deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
             
             update.message.reply_text(
-                f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
+                f"✅ <b>Step 4 Complete: Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
                 f"<b>Current deposits:</b>\n{deposits_summary}\n\n"
                 f"<b>Running total:</b> {user_states[user_id]['total_deposits']:.2f}\n"
                 f"<b>Current balance:</b> {current_balance:.2f}\n\n"
-                f"Would you like to add another bank deposit or finish and export the CSV?",
+                f"<b>Step 5: Would you like to add another bank deposit or finish?</b>",
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
@@ -2292,11 +2440,18 @@ def handle_conversation(update: Update, context) -> None:
         if text == '1':
             user_states[user_id]['state'] = 'waiting_for_csv_path_input'
             update.message.reply_text(
-                "📝 Please enter the full path to your CSV file (e.g., C:\\Users\\YourName\\Documents\\my_file.csv):"
+                "<b>Step 7: Provide existing CSV file path</b>\n\n"
+                "📝 Please enter the full path to your CSV file (e.g., C:\\Users\\YourName\\Documents\\my_file.csv):",
+                parse_mode='HTML'
             )
         elif text == '2' or text.lower() in ['no', 'default', 'new']:
             # Use default filename (no CSV path)
             user_states[user_id]['csv_path'] = None
+            update.message.reply_text(
+                "<b>Step 7: Creating new CSV file</b>\n\n"
+                "📊 Creating a new CSV file with your deposit information...",
+                parse_mode='HTML'
+            )
             # Make sure we're using the message object, not the update directly
             if hasattr(update, 'callback_query'):
                 # If this was triggered from a callback query
@@ -2314,6 +2469,11 @@ def handle_conversation(update: Update, context) -> None:
         elif os.path.isfile(text) and text.lower().endswith('.csv'):
             # User provided a valid CSV path directly
             user_states[user_id]['csv_path'] = text
+            update.message.reply_text(
+                f"<b>Step 7: Appending to existing CSV file</b>\n\n"
+                f"📊 Appending to your existing CSV file at:\n{text}",
+                parse_mode='HTML'
+            )
             try:
                 process_export_csv(update, context, use_manual_input=True)
             except Exception as e:
@@ -2332,6 +2492,11 @@ def handle_conversation(update: Update, context) -> None:
     elif state == 'waiting_for_csv_path_input':
         if os.path.isfile(text) and text.lower().endswith('.csv'):
             user_states[user_id]['csv_path'] = text
+            update.message.reply_text(
+                f"<b>Step 7: Appending to existing CSV file</b>\n\n"
+                f"📊 Appending to your existing CSV file at:\n{text}",
+                parse_mode='HTML'
+            )
             process_export_csv(update, context, use_manual_input=True)
         else:
             update.message.reply_text(
