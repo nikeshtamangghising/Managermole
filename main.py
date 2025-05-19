@@ -885,80 +885,6 @@ def handle_conversation(update: Update, context) -> None:
                 numeric_str = numeric_str.replace(',', '.')
             
             deposit_amount = float(numeric_str)
-            user_states[user_id]['deposit_amount'] = deposit_amount
-            user_states[user_id]['state'] = 'waiting_for_bank_name'
-            
-            update.message.reply_text(
-                f"✅ Deposit amount recorded: {deposit_amount}\n\n"
-                f"📝 Now, please enter the bank name:"
-            )
-        except ValueError:
-            update.message.reply_text(
-                "❗ Invalid amount. Please enter a valid number for the deposit amount:"
-            )
-    
-    elif state == 'waiting_for_bank_name':
-        # Store the bank name
-        user_states[user_id]['bank_name'] = text
-        user_states[user_id]['state'] = 'waiting_for_remaining_balance'
-        
-        # Ask for remaining balance
-        update.message.reply_text(
-            f"✅ Bank name recorded: {text}\n\n"
-            f"📝 Now, please enter the remaining balance (or type '0' if none):"
-        )
-    
-    elif state == 'waiting_for_remaining_balance':
-        # Try to parse the remaining balance
-        try:
-            # Remove any currency symbols and convert to float
-            numeric_str = re.sub(r'[€$£¥]', '', text)
-            # Handle both decimal separators
-            if ',' in numeric_str and '.' not in numeric_str:
-                numeric_str = numeric_str.replace(',', '.')
-            
-            remaining_balance = float(numeric_str)
-            user_states[user_id]['remaining_balance'] = remaining_balance
-            
-            # Add the remaining balance as a special entry if it's greater than 0
-            if remaining_balance > 0:
-                user_states[user_id]['bank_deposits'].append({
-                    'bank': 'Previous Balance',
-                    'amount': remaining_balance
-                })
-                user_states[user_id]['total_deposits'] += remaining_balance
-            
-            # Step 2: Ask user to choose between manual entry and extracted data
-            keyboard = [
-                [InlineKeyboardButton("Enter deposit amount & bank manually", callback_data='csv_manual_input')],
-                [InlineKeyboardButton("Use extracted data only", callback_data='csv_auto_export')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            update.message.reply_text(
-                f"✅ <b>Step 1 Complete: Remaining balance recorded: {remaining_balance:.2f}</b>\n\n"
-                f"<b>Step 2: How would you like to enter deposit information?</b>\n\n"
-                f"• <b>Enter manually</b>: You'll select banks and enter deposit amounts for each bank\n"
-                f"• <b>Use extracted data</b>: I'll use the numbers from your collected messages",
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
-        except ValueError:
-            update.message.reply_text(
-                "❗ Invalid number format. Please enter a valid number for the remaining balance:"
-            )
-            return
-    
-    elif state == 'waiting_for_deposit_amount':
-        # Try to parse the deposit amount
-        try:
-            # Remove any currency symbols and convert to float
-            numeric_str = re.sub(r'[€$£¥]', '', text)
-            # Handle both decimal separators
-            if ',' in numeric_str and '.' not in numeric_str:
-                numeric_str = numeric_str.replace(',', '.')
-            
-            deposit_amount = float(numeric_str)
             
             # Get the current bank
             current_bank = user_states[user_id]['current_bank']
@@ -977,7 +903,7 @@ def handle_conversation(update: Update, context) -> None:
             user_states[user_id]['total_deposits'] += deposit_amount
             
             # Calculate current balance
-            current_balance = user_states[user_id]['total_deposits'] - user_states[user_id]['total_paid']
+            current_balance = user_states[user_id]['total_deposits'] - user_states[user_id].get('total_paid', 0)
             
             # Ask if user wants to add another bank deposit
             keyboard = [
@@ -990,11 +916,11 @@ def handle_conversation(update: Update, context) -> None:
             deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
             
             update.message.reply_text(
-                f"✅ <b>Step 4 Complete: Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
+                f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
                 f"<b>Current deposits:</b>\n{deposits_summary}\n\n"
                 f"<b>Running total:</b> {user_states[user_id]['total_deposits']:.2f}\n"
                 f"<b>Current balance:</b> {current_balance:.2f}\n\n"
-                f"<b>Step 5: Would you like to add another bank deposit or finish?</b>",
+                f"<b>Would you like to add another bank deposit or finish?</b>",
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
@@ -1002,28 +928,40 @@ def handle_conversation(update: Update, context) -> None:
             update.message.reply_text(
                 "❗ Invalid amount. Please enter a valid number for the deposit amount:"
             )
-            return
     
-    elif state == 'waiting_for_bank_name':
-        # Store the custom bank name
-        bank_name = text.strip()
-        user_states[user_id]['current_bank'] = bank_name
-        
-        # Ask for deposit amount
-        update.message.reply_text(
-            f"✅ Bank name set to {bank_name}\n\n"
-            f"Now, please enter the deposit amount for {bank_name}:"
-        )
-        
-        # Update state
-        user_states[user_id]['state'] = 'waiting_for_deposit_amount'
-        return
+    elif state == 'waiting_for_remaining_balance':
+        # Try to parse the remaining balance
+        try:
+            # Remove any currency symbols and convert to float
+            numeric_str = re.sub(r'[€$£¥]', '', text)
+            # Handle both decimal separators
+            if ',' in numeric_str and '.' not in numeric_str:
+                numeric_str = numeric_str.replace(',', '.')
+            
+            remaining_balance = float(numeric_str)
+            user_states[user_id]['remaining_balance'] = remaining_balance
+            
+            # Add the remaining balance as a special entry if it's greater than 0
+            if remaining_balance > 0:
+                user_states[user_id]['bank_deposits'] = [{
+                    'bank': 'Previous Balance',
+                    'amount': remaining_balance
+                }]
+                user_states[user_id]['total_deposits'] = remaining_balance
+            
+            # Show bank selection for deposit entry
+            show_bank_selection_with_done(update, context)
+            
+        except ValueError:
+            update.message.reply_text(
+                "❗ Invalid number format. Please enter a valid number for the remaining balance:"
+            )
     
     elif state == 'waiting_for_csv_path':
         if text == '1':
             user_states[user_id]['state'] = 'waiting_for_csv_path_input'
             update.message.reply_text(
-                "<b>Step 7: Provide existing CSV file path</b>\n\n"
+                "<b>Provide existing CSV file path</b>\n\n"
                 "📝 Please enter the full path to your CSV file (e.g., C:\\Users\\YourName\\Documents\\my_file.csv):",
                 parse_mode='HTML'
             )
@@ -1031,7 +969,7 @@ def handle_conversation(update: Update, context) -> None:
             # Use default filename (no CSV path)
             user_states[user_id]['csv_path'] = None
             update.message.reply_text(
-                "<b>Step 7: Creating new CSV file</b>\n\n"
+                "<b>Creating new CSV file</b>\n\n"
                 "📊 Creating a new CSV file with your deposit information...",
                 parse_mode='HTML'
             )
@@ -1053,7 +991,7 @@ def handle_conversation(update: Update, context) -> None:
             # User provided a valid CSV path directly
             user_states[user_id]['csv_path'] = text
             update.message.reply_text(
-                f"<b>Step 7: Appending to existing CSV file</b>\n\n"
+                f"<b>Appending to existing CSV file</b>\n\n"
                 f"📊 Appending to your existing CSV file at:\n{text}",
                 parse_mode='HTML'
             )
@@ -1076,7 +1014,7 @@ def handle_conversation(update: Update, context) -> None:
         if os.path.isfile(text) and text.lower().endswith('.csv'):
             user_states[user_id]['csv_path'] = text
             update.message.reply_text(
-                f"<b>Step 7: Appending to existing CSV file</b>\n\n"
+                f"<b>Appending to existing CSV file</b>\n\n"
                 f"📊 Appending to your existing CSV file at:\n{text}",
                 parse_mode='HTML'
             )
@@ -1084,6 +1022,45 @@ def handle_conversation(update: Update, context) -> None:
         else:
             update.message.reply_text(
                 "❗ Invalid file path or file doesn't exist. Please enter a valid CSV file path:"
+            )
+    
+    elif state == 'waiting_for_limit_amount':
+        # Try to parse the limit amount
+        try:
+            # Remove any currency symbols and convert to float
+            numeric_str = re.sub(r'[€$£¥]', '', text)
+            # Handle both decimal separators
+            if ',' in numeric_str and '.' not in numeric_str:
+                numeric_str = numeric_str.replace(',', '.')
+            
+            limit_amount = float(numeric_str)
+            selected_bank = user_states[user_id].get('selected_bank')
+            
+            # Initialize bank limits for this user if not already done
+            if user_id not in user_bank_limits:
+                user_bank_limits[user_id] = {}
+            
+            # Set the limit for this bank
+            user_bank_limits[user_id][selected_bank] = limit_amount
+            
+            # Calculate remaining limit
+            total_deposit = user_bank_deposits.get(user_id, {}).get(selected_bank, 0)
+            remaining_limit = limit_amount - total_deposit
+            
+            update.message.reply_text(
+                f"✅ Limit of {limit_amount} set for {selected_bank}.\n\n"
+                f"📊 <b>Remaining Limit Calculation</b>:\n"
+                f"Bank Limit: {limit_amount}\n"
+                f"Total Deposits: {total_deposit}\n"
+                f"<b>Remaining Limit: {remaining_limit}</b>",
+                parse_mode='HTML'
+            )
+            
+            # Clear the conversation state
+            del user_states[user_id]
+        except ValueError:
+            update.message.reply_text(
+                "❗ Invalid amount. Please enter a valid number for the limit amount:"
             )
 
 def export_csv(update: Update, context) -> None:
@@ -2362,121 +2339,6 @@ def handle_conversation(update: Update, context) -> None:
                 numeric_str = numeric_str.replace(',', '.')
             
             deposit_amount = float(numeric_str)
-            user_states[user_id]['deposit_amount'] = deposit_amount
-            
-            # Check if this is for bank deposit entry or CSV export
-            if user_states[user_id].get('action') == 'deposit_entry':
-                current_bank = user_states[user_id].get('current_bank')
-                
-                # Initialize bank deposits for this user if not already done
-                if user_id not in user_bank_deposits:
-                    user_bank_deposits[user_id] = {}
-                
-                # Add to or update the deposit for this bank
-                if current_bank in user_bank_deposits[user_id]:
-                    user_bank_deposits[user_id][current_bank] += deposit_amount
-                else:
-                    user_bank_deposits[user_id][current_bank] = deposit_amount
-                
-                # Add to bank_deposits list for summary
-                if 'bank_deposits' not in user_states[user_id]:
-                    user_states[user_id]['bank_deposits'] = []
-                
-                user_states[user_id]['bank_deposits'].append({
-                    'bank': current_bank,
-                    'amount': deposit_amount
-                })
-                
-                # Update total deposits
-                if 'total_deposits' not in user_states[user_id]:
-                    user_states[user_id]['total_deposits'] = 0.0
-                user_states[user_id]['total_deposits'] += deposit_amount
-                
-                # Show deposit confirmation and return to bank selection
-                update.message.reply_text(
-                    f"✅ Deposit of {deposit_amount:.2f} recorded for {current_bank}.\n\n"
-                    f"Current total deposit: {user_states[user_id]['total_deposits']:.2f}\n\n"
-                    f"Select another bank or click Done when finished."
-                )
-                
-                # Show bank selection again with Done button
-                user_states[user_id]['state'] = 'selecting_bank'
-                show_bank_selection_with_done(update, context)
-            else:
-                # Continue with the CSV export flow
-                user_states[user_id]['state'] = 'waiting_for_bank_name'
-                
-                update.message.reply_text(
-                    f"✅ Deposit amount recorded: {deposit_amount}\n\n"
-                    f"📝 Now, please enter the bank name:"
-                )
-        except ValueError:
-            update.message.reply_text(
-                "❗ Invalid amount. Please enter a valid number for the deposit amount:"
-            )
-    
-    elif state == 'waiting_for_bank_name':
-        # Store the bank name
-        user_states[user_id]['bank_name'] = text
-        user_states[user_id]['state'] = 'waiting_for_remaining_balance'
-        
-        # Ask for remaining balance
-        update.message.reply_text(
-            f"✅ Bank name recorded: {text}\n\n"
-            f"📝 Now, please enter the remaining balance (or type '0' if none):"
-        )
-    
-    elif state == 'waiting_for_remaining_balance':
-        # Try to parse the remaining balance
-        try:
-            # Remove any currency symbols and convert to float
-            numeric_str = re.sub(r'[€$£¥]', '', text)
-            # Handle both decimal separators
-            if ',' in numeric_str and '.' not in numeric_str:
-                numeric_str = numeric_str.replace(',', '.')
-            
-            remaining_balance = float(numeric_str)
-            user_states[user_id]['remaining_balance'] = remaining_balance
-            
-            # Add the remaining balance as a special entry if it's greater than 0
-            if remaining_balance > 0:
-                user_states[user_id]['bank_deposits'].append({
-                    'bank': 'Previous Balance',
-                    'amount': remaining_balance
-                })
-                user_states[user_id]['total_deposits'] += remaining_balance
-            
-            # Step 2: Ask user to choose between manual entry and extracted data
-            keyboard = [
-                [InlineKeyboardButton("Enter deposit amount & bank manually", callback_data='csv_manual_input')],
-                [InlineKeyboardButton("Use extracted data only", callback_data='csv_auto_export')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            update.message.reply_text(
-                f"✅ <b>Step 1 Complete: Remaining balance recorded: {remaining_balance:.2f}</b>\n\n"
-                f"<b>Step 2: How would you like to enter deposit information?</b>\n\n"
-                f"• <b>Enter manually</b>: You'll select banks and enter deposit amounts for each bank\n"
-                f"• <b>Use extracted data</b>: I'll use the numbers from your collected messages",
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
-        except ValueError:
-            update.message.reply_text(
-                "❗ Invalid number format. Please enter a valid number for the remaining balance:"
-            )
-            return
-    
-    elif state == 'waiting_for_deposit_amount':
-        # Try to parse the deposit amount
-        try:
-            # Remove any currency symbols and convert to float
-            numeric_str = re.sub(r'[€$£¥]', '', text)
-            # Handle both decimal separators
-            if ',' in numeric_str and '.' not in numeric_str:
-                numeric_str = numeric_str.replace(',', '.')
-            
-            deposit_amount = float(numeric_str)
             
             # Get the current bank
             current_bank = user_states[user_id]['current_bank']
@@ -2495,7 +2357,7 @@ def handle_conversation(update: Update, context) -> None:
             user_states[user_id]['total_deposits'] += deposit_amount
             
             # Calculate current balance
-            current_balance = user_states[user_id]['total_deposits'] - user_states[user_id]['total_paid']
+            current_balance = user_states[user_id]['total_deposits'] - user_states[user_id].get('total_paid', 0)
             
             # Ask if user wants to add another bank deposit
             keyboard = [
@@ -2508,11 +2370,11 @@ def handle_conversation(update: Update, context) -> None:
             deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
             
             update.message.reply_text(
-                f"✅ <b>Step 4 Complete: Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
+                f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
                 f"<b>Current deposits:</b>\n{deposits_summary}\n\n"
                 f"<b>Running total:</b> {user_states[user_id]['total_deposits']:.2f}\n"
                 f"<b>Current balance:</b> {current_balance:.2f}\n\n"
-                f"<b>Step 5: Would you like to add another bank deposit or finish?</b>",
+                f"<b>Would you like to add another bank deposit or finish?</b>",
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
@@ -2520,28 +2382,40 @@ def handle_conversation(update: Update, context) -> None:
             update.message.reply_text(
                 "❗ Invalid amount. Please enter a valid number for the deposit amount:"
             )
-            return
     
-    elif state == 'waiting_for_bank_name':
-        # Store the custom bank name
-        bank_name = text.strip()
-        user_states[user_id]['current_bank'] = bank_name
-        
-        # Ask for deposit amount
-        update.message.reply_text(
-            f"✅ Bank name set to {bank_name}\n\n"
-            f"Now, please enter the deposit amount for {bank_name}:"
-        )
-        
-        # Update state
-        user_states[user_id]['state'] = 'waiting_for_deposit_amount'
-        return
+    elif state == 'waiting_for_remaining_balance':
+        # Try to parse the remaining balance
+        try:
+            # Remove any currency symbols and convert to float
+            numeric_str = re.sub(r'[€$£¥]', '', text)
+            # Handle both decimal separators
+            if ',' in numeric_str and '.' not in numeric_str:
+                numeric_str = numeric_str.replace(',', '.')
+            
+            remaining_balance = float(numeric_str)
+            user_states[user_id]['remaining_balance'] = remaining_balance
+            
+            # Add the remaining balance as a special entry if it's greater than 0
+            if remaining_balance > 0:
+                user_states[user_id]['bank_deposits'] = [{
+                    'bank': 'Previous Balance',
+                    'amount': remaining_balance
+                }]
+                user_states[user_id]['total_deposits'] = remaining_balance
+            
+            # Show bank selection for deposit entry
+            show_bank_selection_with_done(update, context)
+            
+        except ValueError:
+            update.message.reply_text(
+                "❗ Invalid number format. Please enter a valid number for the remaining balance:"
+            )
     
     elif state == 'waiting_for_csv_path':
         if text == '1':
             user_states[user_id]['state'] = 'waiting_for_csv_path_input'
             update.message.reply_text(
-                "<b>Step 7: Provide existing CSV file path</b>\n\n"
+                "<b>Provide existing CSV file path</b>\n\n"
                 "📝 Please enter the full path to your CSV file (e.g., C:\\Users\\YourName\\Documents\\my_file.csv):",
                 parse_mode='HTML'
             )
@@ -2549,7 +2423,7 @@ def handle_conversation(update: Update, context) -> None:
             # Use default filename (no CSV path)
             user_states[user_id]['csv_path'] = None
             update.message.reply_text(
-                "<b>Step 7: Creating new CSV file</b>\n\n"
+                "<b>Creating new CSV file</b>\n\n"
                 "📊 Creating a new CSV file with your deposit information...",
                 parse_mode='HTML'
             )
@@ -2571,7 +2445,7 @@ def handle_conversation(update: Update, context) -> None:
             # User provided a valid CSV path directly
             user_states[user_id]['csv_path'] = text
             update.message.reply_text(
-                f"<b>Step 7: Appending to existing CSV file</b>\n\n"
+                f"<b>Appending to existing CSV file</b>\n\n"
                 f"📊 Appending to your existing CSV file at:\n{text}",
                 parse_mode='HTML'
             )
@@ -2594,7 +2468,7 @@ def handle_conversation(update: Update, context) -> None:
         if os.path.isfile(text) and text.lower().endswith('.csv'):
             user_states[user_id]['csv_path'] = text
             update.message.reply_text(
-                f"<b>Step 7: Appending to existing CSV file</b>\n\n"
+                f"<b>Appending to existing CSV file</b>\n\n"
                 f"📊 Appending to your existing CSV file at:\n{text}",
                 parse_mode='HTML'
             )
