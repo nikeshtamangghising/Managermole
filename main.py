@@ -1303,9 +1303,7 @@ def export_simple_csv(update: Update, context) -> None:
         )
 
 def process_export_csv(update: Update, context, use_manual_input=False) -> None:
-    """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Remaining Balance.
-    Maintains a running balance by using the previous day's remaining balance as today's starting balance.
-    Supports multiple bank deposits on the same day and provides detailed summaries."""
+    """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Remaining Balance."""
     # Determine if this is called from a callback query or directly
     if hasattr(update, 'callback_query') and update.callback_query is not None:
         query = update.callback_query
@@ -1546,10 +1544,10 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             
             # Write header if creating a new file
             if not file_exists:
-                fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Total Deposit', 'Total Paid', 'Remaining Balance']
+                fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Total Deposit', 'Remaining Balance']
                 writer.writerow(fieldnames)
             
-            # If we have manually entered bank deposits, write each one with improved formatting
+            # If we have manually entered bank deposits, write each one
             if bank_deposits:
                 # Sort deposits to ensure Previous Balance comes first if it exists
                 sorted_deposits = sorted(bank_deposits, key=lambda x: 0 if x['bank'] == 'Previous Balance' else 1)
@@ -1564,9 +1562,9 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
                     # Write the deposit information
                     # Only include date in the first row
                     if i == 0:
-                        deposit_row = [current_date, deposit_amount_formatted, bank_name, '', '', '', '']
+                        deposit_row = [current_date, deposit_amount_formatted, bank_name, '', '', '']
                     else:
-                        deposit_row = ['', deposit_amount_formatted, bank_name, '', '', '', '']
+                        deposit_row = ['', deposit_amount_formatted, bank_name, '', '', '']
                     writer.writerow(deposit_row)
             else:
                 # No manually entered deposits, use the first amount from extracted data
@@ -1584,10 +1582,10 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
                         deposit_amount_formatted = amounts[0]
                 
                 # Write the deposit information in the first row
-                deposit_row = [current_date, deposit_amount_formatted, "Remaining Balance", '', '', '', '']
+                deposit_row = [current_date, deposit_amount_formatted, "Remaining Balance", '', '', '']
                 writer.writerow(deposit_row)
             
-            # Write the charges (payments) in subsequent rows with running subtotals
+            # Process amounts and charges together for Paid To Host column
             running_paid = 0.0
             running_total = 0.0
             
@@ -1624,51 +1622,38 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
                 # Calculate row total (amount + charge)
                 row_total = amount_value + charge_value
                 running_total += row_total
-                
-                # Format the values for display
-                amount_formatted = f"{amount_value:.2f}" if amount_value != 0 else ''
-                charge_formatted = f"{charge_value:.2f}" if charge_value != 0 else ''
-                row_total_formatted = f"{row_total:.2f}" if row_total != 0 else ''
-                
-                # Write the row with amount, charge, and their sum
-                if amount_value != 0 or charge_value != 0:
-                    row = ['', amount_formatted, '', charge_formatted, '', '', '']
-                    writer.writerow(row)
-                    
-                    # Write the sum in the next row
-                    if row_total != 0:
-                        sum_row = ['', '', '', f"Row Total: {row_total_formatted}", '', '', '']
-                        writer.writerow(sum_row)
-                
-                # Update running totals
                 running_paid += charge_value
+                
+                # Write the row with the sum in Paid To Host column
+                if amount_value != 0 or charge_value != 0:
+                    row = ['', '', '', f"{row_total:.2f}", '', '']
+                    writer.writerow(row)
             
             # Add empty row before totals
-            writer.writerow(['', '', '', '', '', '', ''])
+            writer.writerow(['', '', '', '', '', ''])
             
-            # Calculate running totals for the bottom row
-            # Format the totals with two decimal places
-            total_deposit_formatted = f"{total_deposit:.2f}"
-            total_paid_formatted = f"{total_paid:.2f}"
-            balance_formatted = f"{balance:.2f}"
+            # Calculate final totals
+            total_deposit = sum(deposit['amount'] for deposit in bank_deposits) if bank_deposits else 0
+            total_paid = running_paid
+            remaining_balance = total_deposit - total_paid
             
-            # Write the totals row at the bottom with proper labels and formatting
-            writer.writerow(['', '', '', '', '', '', ''])  # Empty row for spacing
-            totals_row = ['', 'SUMMARY', '', 'TOTALS:', total_deposit_formatted, total_paid_formatted, balance_formatted]
+            # Write the totals row at the bottom
+            writer.writerow(['', '', '', '', '', ''])  # Empty row for spacing
+            totals_row = ['', 'SUMMARY', '', f"Total Paid: {total_paid:.2f}", f"Total Deposit: {total_deposit:.2f}", f"Remaining Balance: {remaining_balance:.2f}"]
             writer.writerow(totals_row)
             
             # Add a footer with additional information
-            writer.writerow(['', '', '', '', '', '', ''])  # Empty row for spacing
-            writer.writerow(['', 'Report generated on:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '', '', '', ''])
+            writer.writerow(['', '', '', '', '', ''])  # Empty row for spacing
+            writer.writerow(['', 'Report generated on:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '', '', ''])
             if bank_deposits:
-                writer.writerow(['', 'Banks included:', ', '.join([deposit['bank'] for deposit in bank_deposits]), '', '', '', ''])
+                writer.writerow(['', 'Banks included:', ', '.join([deposit['bank'] for deposit in bank_deposits]), '', '', ''])
 
         # Send the file to the user with improved caption
         with open(filename, 'rb') as file:
             message.reply_document(
                 document=file,
                 filename=os.path.basename(filename),
-                caption=f"📊 Enhanced CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Remaining Balance.\n\nThe file includes:\n- Multiple bank deposits with their respective amounts ({len(bank_deposits)} banks included)\n- Individual payments in the Paid To Host column ({len(charges)} payments recorded)\n- Row totals showing sum of amount and charge for each entry\n- Running totals with automatic calculations\n- Previous balance of {previous_balance:.2f} included in calculations\n- Final remaining balance: {balance:.2f}\n- Improved formatting for better readability"
+                caption=f"📊 Enhanced CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Remaining Balance.\n\nThe file includes:\n- Bank deposits with their respective amounts ({len(bank_deposits)} banks included)\n- Running sums of amounts and charges in the Paid To Host column\n- Total deposit and remaining balance calculations\n- Previous balance of {previous_balance:.2f} included in calculations\n- Final remaining balance: {remaining_balance:.2f}"
             )
 
         # Don't remove the file if it's a user-specified path
