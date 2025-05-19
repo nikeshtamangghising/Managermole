@@ -126,14 +126,25 @@ def create_socket_lock():
     """Create a socket-based lock to ensure only one instance of the bot runs."""
     lock_port = 10001
     
-    # First, try to kill any existing instances
+    # First, try to kill any existing instances with multiple attempts
+    for attempt in range(3):
+        try:
+            kill_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            kill_socket.settimeout(1)
+            kill_socket.connect(('localhost', lock_port))
+            kill_socket.send(b'kill')
+            kill_socket.close()
+            time.sleep(5)  # Wait for the kill signal to take effect
+        except:
+            pass
+    
+    # Additional cleanup of any remaining sockets
     try:
-        kill_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        kill_socket.settimeout(1)
-        kill_socket.connect(('localhost', lock_port))
-        kill_socket.send(b'kill')
-        kill_socket.close()
-        time.sleep(5)
+        for sock in [s for s in socket.socket() if s.fileno() > 0]:
+            try:
+                sock.close()
+            except:
+                pass
     except:
         pass
     
@@ -794,52 +805,6 @@ def show_bank_selection_with_done(update: Update, context) -> None:
     else:
         # This is for handling cases where we need to send a new message after a callback query
         context.bot.send_message(chat_id=user_id, text=message_text, reply_markup=reply_markup, parse_mode='HTML')
-    for i, bank in enumerate(NEPAL_BANKS):
-        if i % 3 == 0 and i > 0:
-            keyboard.append(row)
-            row = []
-        row.append(InlineKeyboardButton(bank, callback_data=f"select_bank_{i}"))
-    
-    # Add user's custom banks if any
-    if user_id in user_custom_banks and user_custom_banks[user_id]:
-        # Add a separator row if there are default banks
-        if row:
-            keyboard.append(row)
-            row = []
-        
-        # Add a header for custom banks
-        keyboard.append([InlineKeyboardButton("───────── YOUR CUSTOM BANKS ─────────", callback_data="custom_bank_header")])
-        
-        # Add custom banks (3 per row)
-        for i, bank in enumerate(user_custom_banks[user_id]):
-            if i % 3 == 0 and i > 0:
-                keyboard.append(row)
-                row = []
-            # Use a different prefix for custom banks to distinguish them
-            row.append(InlineKeyboardButton(f"🔶 {bank}", callback_data=f"select_custom_bank_{i}"))
-    
-    # Add option to enter a different bank name
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("───────── OTHER OPTIONS ─────────", callback_data="header_no_action")])
-    keyboard.append([InlineKeyboardButton("✏️ Enter a different bank name", callback_data="enter_different_bank")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # If this is from a callback query, use edit_message_text
-    if hasattr(update, 'callback_query') and update.callback_query is not None:
-        update.callback_query.edit_message_text(
-            text="🏦 <b>Please select a bank for your deposit:</b>\n\nChoose from the list below or enter a custom bank name.",
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
-    else:
-        # Otherwise, send a new message
-        message.reply_text(
-            "🏦 <b>Please select a bank for your deposit:</b>\n\nChoose from the list below or enter a custom bank name.",
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
 
 def ask_for_deposit_info(update: Update, context) -> None:
     """Ask the user for deposit amount, bank name, and remaining balance.
@@ -1674,405 +1639,6 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
         if user_id in user_states:
             del user_states[user_id]
 
-def export_json(update: Update, context) -> None:
-    """Export the results as a JSON file with 3 columns: amounts, charges, and sum."""
-    user_id = update.effective_user.id
-
-    if user_id not in user_messages or not user_messages[user_id]:
-        update.message.reply_text("❗ No messages collected yet. Forward some messages first.")
-        return
-
-    # Get user preferences
-    preferences = user_preferences.get(user_id, DEFAULT_PREFERENCES.copy())
-    decimal_separator = preferences['decimal_separator']
-
-    # Create the appropriate pattern based on user preference
-    if decimal_separator == '.':
-        pattern = r'([€$£¥])?(\-?\d+(?:\.\d+)?)'
-    else:
-        pattern = r'([€$£¥])?(\-?\d+(?:,\d+)?)'
-
-    amounts = []
-    charges = []
-
-    # Process all collected messages
-    for message_data in user_messages[user_id]:
-        message_text = message_data['text']
-
-        # Find all matches in the message
-        matches = re.findall(pattern, message_text)
-
-        for match in matches:
-            currency, original_number, processed_number, value, has_decimal = extract_number_value(match, decimal_separator, message_text)
-
-            # Format the extracted value
-            extracted_value = f"{currency}{processed_number}" if currency and preferences['include_currency'] else processed_number
-
-            # Add to appropriate category
-            if value > AMOUNT_THRESHOLD:
-                amounts.append(extracted_value)
-            else:
-                charges.append(extracted_value)
-
-    if not amounts and not charges:
-        update.message.reply_text(
-            f"❗ I couldn't find any numbers in your collected messages."
-        )
-        return
-
-    # Calculate the sum of all values
-    total_sum = 0
-    for value_list in [amounts, charges]:
-        for value_str in value_list:
-            # Remove any currency symbol
-            numeric_str = re.sub(r'[€$£¥]', '', value_str)
-            # Replace comma with period if needed
-            if decimal_separator == ',':
-                numeric_str = numeric_str.replace(',', '.')
-            # Convert to float and add to sum
-            try:
-                total_sum += float(numeric_str)
-            except ValueError:
-                # Skip if conversion fails
-                pass
-
-    # Create simplified export data with 3 columns
-    export_data = {
-        'Amounts': amounts,
-        'Charges': charges,
-        'Total Sum': total_sum
-    }
-    
-    # Create a JSON file
-    filename = f"decimal_stripper_export_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-
-    try:
-        with open(filename, 'w', encoding='utf-8') as jsonfile:
-            json.dump(export_data, jsonfile, indent=4, ensure_ascii=False)
-
-        # Send the file to the user
-        with open(filename, 'rb') as file:
-            update.message.reply_document(
-                document=file,
-                filename=filename,
-                caption=f"📊 JSON export with {len(amounts)} amounts, {len(charges)} charges, and their sum."
-            )
-
-        # Clean up the file
-        os.remove(filename)
-
-    except Exception as e:
-        logger.error(f"Error exporting JSON: {e}")
-        update.message.reply_text(
-            "❗ Sorry, there was an error creating your JSON file. Please try again later."
-        )
-
-def clear_command(update: Update, context) -> None:
-    """Clear all collected messages for the user."""
-    user_id = update.effective_user.id
-    
-    # Reset the message collection for this user
-    user_messages[user_id] = []
-    
-    update.message.reply_text(
-        "✅ Your collection has been cleared. You can start forwarding new messages now."
-    )
-
-def settings_command(update: Update, context) -> None:
-    """Show and allow changing user preferences."""
-    user_id = update.effective_user.id
-
-    # Initialize user preferences if not already set
-    if user_id not in user_preferences:
-        user_preferences[user_id] = DEFAULT_PREFERENCES.copy()
-
-    preferences = user_preferences[user_id]
-
-    # Create inline keyboard for settings
-    keyboard = [
-        [
-            InlineKeyboardButton("Decimal: .", callback_data="set_decimal_."),
-            InlineKeyboardButton("Decimal: ,", callback_data="set_decimal_,")
-        ],
-        [
-            InlineKeyboardButton(
-                "Currency: " + ("ON ✅" if preferences['include_currency'] else "OFF ❌"),
-                callback_data="toggle_currency"
-            )
-        ],
-        [
-            InlineKeyboardButton("Format: Simple", callback_data="set_format_simple"),
-            InlineKeyboardButton("Format: Detailed", callback_data="set_format_detailed")
-        ],
-        [
-            InlineKeyboardButton(
-                "Silent collection: " + ("ON ✅" if preferences['silent_collection'] else "OFF ❌"),
-                callback_data="toggle_silent"
-            )
-        ],
-        [
-            InlineKeyboardButton("🏦 Bank Deposit Entry", callback_data="bank_deposit_entry")
-        ],
-        [
-            InlineKeyboardButton("💰 Check Remaining Limit", callback_data="check_remaining_limit")
-        ],this
-        [
-            InlineKeyboardButton("➕ Add Custom Bank", callback_data="add_custom_bank")
-        ]
-    ]
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    current_settings = (
-        f"⚙️ <b>Current Settings</b>\n\n"
-        f"🔢 Decimal Separator: '{preferences['decimal_separator']}'\n"
-        f"💱 Include Currency: {'Yes' if preferences['include_currency'] else 'No'}\n"
-        f"📋 Output Format: {preferences['output_format'].capitalize()}\n"
-        f"🔕 Silent Collection: {'Yes' if preferences['silent_collection'] else 'No'}\n\n"
-        f"Click below to change settings or use banking features:"
-    )
-
-    update.message.reply_text(
-        current_settings,
-        reply_markup=reply_markup,
-        parse_mode='HTML'
-    )
-
-def button_callback(update: Update, context) -> None:
-    """Handle button presses from inline keyboards."""
-    query = update.callback_query
-    user_id = query.from_user.id
-    data = query.data
-    
-    # Handle header buttons that should not trigger any action
-    if data == "header_no_action" or data == "custom_bank_header":
-        query.answer("This is just a header, please select an option below.")
-        return
-
-    # Initialize user preferences if not already set
-    if user_id not in user_preferences:
-        user_preferences[user_id] = DEFAULT_PREFERENCES.copy()
-
-    # Handle different button actions
-    if data.startswith('set_decimal_'):
-        user_preferences[user_id]['decimal_separator'] = data[-1]
-    elif data == 'toggle_currency':
-        user_preferences[user_id]['include_currency'] = not user_preferences[user_id]['include_currency']
-    elif data.startswith('set_format_'):
-        user_preferences[user_id]['output_format'] = data[11:]
-    elif data == 'toggle_silent':
-        user_preferences[user_id]['silent_collection'] = not user_preferences[user_id]['silent_collection']
-    elif data == 'csv_simple_export':
-        # User wants a simple CSV with just amounts, charges and running sums
-        query.edit_message_text(text="Processing simple CSV export...")
-        export_simple_csv(update, context)
-        return
-    elif data == 'csv_detailed_export':
-        # User wants the detailed CSV export - Step 1: Ask for remaining balance
-        # Initialize user state for CSV export with enhanced structure
-        user_states[user_id] = {
-            'state': 'waiting_for_remaining_balance',
-            'action': 'csv_export',
-            'remaining_balance': None,  # Will store the manually entered remaining balance
-            'bank_deposits': [],  # Will store multiple bank deposits for the same day
-            'current_bank': None,  # Will store the currently selected bank
-            'csv_path': None,  # Will store the CSV file path if appending to existing file
-            'total_deposits': 0.0,  # Will track the running total of deposits
-            'total_paid': 0.0  # Will track the running total of payments
-        }
-        
-        # Step 1: Ask for remaining balance with improved instructions
-        message_text = (
-            "💰 <b>Step 1: Please enter your remaining balance:</b>\n\n"
-            "This will be used as the starting balance for your report and included in calculations. "
-            "If you're continuing from a previous report, this should be your current balance.\n\n"
-            "Enter 0 if you don't want to include a remaining balance."
-        )
-        
-        query.edit_message_text(text=message_text, parse_mode='HTML')
-        return
-    elif data == 'csv_manual_input':
-        # Step 3: Show bank selection for deposit entry
-        query.edit_message_text(
-            "<b>Step 3: Please select a bank for your deposit:</b>\n\n"
-            "Choose a bank from the list below. After selecting a bank, you'll be asked to enter the deposit amount.\n\n"
-            "You can select multiple banks one by one. When you're done adding all banks, click 'Finish and Export CSV'.",
-            parse_mode='HTML'
-        )
-        # Show bank selection with a Done button
-        show_bank_selection_with_done(update, context)
-        return
-    elif data == 'csv_auto_export':
-        # User wants to use only extracted data
-        query.edit_message_text(text="Processing CSV export with extracted data...")
-        process_export_csv(update, context, use_manual_input=False)
-        return
-    elif data == 'add_another_bank':
-        # Step 5: User wants to add another bank deposit
-        query.edit_message_text(
-            "<b>Step 5: Add another bank deposit</b>\n\n"
-            "You can select another bank to add more deposits, or click 'Finish and Export CSV' when you've finished adding all your bank deposits.",
-            parse_mode='HTML'
-        )
-        show_bank_selection_with_done(update, context)
-        return
-    elif data == 'finish_csv_export':
-        # Step 6: User wants to finish and export CSV - Ask about file creation/append
-        query.edit_message_text(
-            "<b>Step 6: Choose file option</b>\n\n"
-            "📝 Do you want to append to an existing CSV file or create a new one?\n\n"
-            "1. Yes - I'll provide the file path to append to\n"
-            "2. No - Create a new file (default)\n\n"
-            "Please reply with '1' or '2', or enter the full path to your CSV file.\n\n"
-            "<b>Note:</b> This will be the final step before generating your well-managed CSV file with all your bank deposits and transaction details.",
-            parse_mode='HTML'
-        )
-        
-        # Update state
-        user_states[user_id]['state'] = 'waiting_for_csv_path'
-        return
-    elif data == 'bank_deposit_entry':
-        # User wants to manually enter bank deposit information
-        query.edit_message_text(text="Starting bank deposit entry process...")
-        start_bank_deposit_entry(update, context)
-        return
-    elif data == 'check_remaining_limit':
-        # User wants to check remaining limit for a bank
-        query.edit_message_text(text="Starting remaining limit check process...")
-        start_remaining_limit_check(update, context)
-        return
-    elif data == 'add_custom_bank':
-        # User wants to add a custom bank
-        query.edit_message_text(text="Starting custom bank addition process...")
-        start_add_custom_bank(update, context)
-        return
-    elif data == 'done_bank_selection':
-        # User is done with bank selection
-        if user_id in user_states and user_states[user_id].get('action') == 'deposit_entry':
-            # Check if any deposits were made
-            if 'bank_deposits' in user_states[user_id] and user_states[user_id]['bank_deposits']:
-                # Show summary of deposits
-                deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
-                total_deposits = user_states[user_id]['total_deposits']
-                
-                query.edit_message_text(
-                    f"✅ <b>Bank deposit entry completed</b>\n\n"
-                    f"<b>Deposits recorded:</b>\n{deposits_summary}\n\n"
-                    f"<b>Total deposits:</b> {total_deposits:.2f}\n\n"
-                    f"Thank you for using the bank deposit entry feature!",
-                    parse_mode='HTML'
-                )
-            else:
-                # No deposits were made
-                query.edit_message_text(
-                    "❗ No deposits were recorded.\n\n"
-                    "You can start again using the /menu command."
-                )
-            
-            # Clear the user state
-            del user_states[user_id]
-        else:
-            query.edit_message_text(
-                "Operation cancelled. Use /menu to access other features."
-            )
-        return
-        
-    elif data.startswith('select_bank_') or data.startswith('select_custom_bank_'):
-        # User selected a bank from the list (either default or custom)
-        if data.startswith('select_bank_'):
-            # Default bank selected
-            bank_index = int(data.split('_')[-1])
-            if 0 <= bank_index < len(NEPAL_BANKS):
-                selected_bank = NEPAL_BANKS[bank_index]
-                user_states[user_id]['selected_bank'] = selected_bank
-        else:
-            # Custom bank selected
-            bank_index = int(data.split('_')[-1])
-            if user_id in user_custom_banks and 0 <= bank_index < len(user_custom_banks[user_id]):
-                selected_bank = user_custom_banks[user_id][bank_index]
-                user_states[user_id]['selected_bank'] = selected_bank
-            else:
-                query.answer("Error: Custom bank not found")
-                return
-        
-        # Process based on the action
-        if user_states[user_id].get('action') == 'deposit_entry':
-            query.edit_message_text(text=f"Selected bank: {selected_bank}\n\nPlease enter the deposit amount:")
-            user_states[user_id]['current_bank'] = selected_bank
-            user_states[user_id]['state'] = 'waiting_for_deposit_amount'
-        elif user_states[user_id].get('action') == 'limit_check':
-            query.edit_message_text(text=f"Selected bank: {selected_bank}\n\nPlease enter the limit amount for this bank:")
-            user_states[user_id]['state'] = 'waiting_for_limit_amount'
-        elif user_states[user_id].get('action') == 'csv_export':
-            # Step 4: For CSV export, store the bank name and ask for deposit amount
-            user_states[user_id]['current_bank'] = selected_bank
-            query.edit_message_text(
-                f"<b>Step 4: Enter deposit amount for {selected_bank}</b>\n\n"
-                f"Please enter the deposit amount for this bank:",
-                parse_mode='HTML'
-            )
-            user_states[user_id]['state'] = 'waiting_for_deposit_amount'
-        return
-        
-    elif data == 'enter_different_bank':
-        # User wants to enter a custom bank name for this transaction
-        query.edit_message_text(text="Please enter the bank name in your next message:")
-        user_states[user_id]['state'] = 'waiting_for_bank_name'
-        return
-
-    # Get updated preferences
-    preferences = user_preferences[user_id]
-
-    # Update the settings message with new keyboard
-    keyboard = [
-        [
-            InlineKeyboardButton("Decimal: .", callback_data="set_decimal_."),
-            InlineKeyboardButton("Decimal: ,", callback_data="set_decimal_,")
-        ],
-        [
-            InlineKeyboardButton(
-                "Currency: " + ("ON ✅" if preferences['include_currency'] else "OFF ❌"),
-                callback_data="toggle_currency"
-            )
-        ],
-        [
-            InlineKeyboardButton("Format: Simple", callback_data="set_format_simple"),
-            InlineKeyboardButton("Format: Detailed", callback_data="set_format_detailed")
-        ],
-        [
-            InlineKeyboardButton(
-                "Silent collection: " + ("ON ✅" if preferences['silent_collection'] else "OFF ❌"),
-                callback_data="toggle_silent"
-            )
-        ]
-    ]
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Create updated settings text
-    current_settings = (
-        f"⚙️ <b>Current Settings</b>\n\n"
-        f"🔢 Decimal Separator: '{preferences['decimal_separator']}'\n"
-        f"💱 Include Currency: {'Yes' if preferences['include_currency'] else 'No'}\n"
-        f"📋 Output Format: {preferences['output_format'].capitalize()}\n"
-        f"🔕 Silent Collection: {'Yes' if preferences['silent_collection'] else 'No'}\n\n"
-        f"Click below to change settings:"
-    )
-
-    try:
-        # Edit the message with updated settings
-        query.edit_message_text(
-            text=current_settings,
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        # Message is not modified, ignore the error
-        logger.error(f"Error updating settings message: {e}")
-
-    # Answer the callback query to remove the loading state
-    query.answer(f"Setting updated: {data}")
-
 def stats_command(update: Update, context) -> None:
     """Show statistics about collected messages."""
     user_id = update.effective_user.id
@@ -2136,7 +1702,7 @@ def stats_command(update: Update, context) -> None:
     update.message.reply_text(stats_message, parse_mode='HTML')
 
 def show_bank_selection_with_done(update: Update, context) -> None:
-    """Show a keyboard with bank selection options and a Done button."""
+    """Show a keyboard with Nepali banks and a Done button."""
     # Determine if this is called from a callback query or directly
     if hasattr(update, 'callback_query') and update.callback_query is not None:
         user_id = update.callback_query.from_user.id
@@ -2232,132 +1798,370 @@ def show_bank_selection_with_done(update: Update, context) -> None:
             parse_mode='HTML'
         )
 
-def start_bank_deposit_entry(update: Update, context) -> None:
-    """Start the process of entering a bank deposit manually."""
-    user_id = update.callback_query.from_user.id
-    
-    # Initialize user state
-    user_states[user_id] = {
-        'state': 'selecting_bank',
-        'action': 'deposit_entry',
-        'bank_deposits': [],  # Initialize bank_deposits list
-        'total_deposits': 0.0  # Initialize total_deposits
-    }
-    
-    # Create a keyboard with Nepali banks and user's custom banks
-    keyboard = []
-    row = []
-    
-    # Add default Nepali banks in a more organized way (3 per row)
-    for i, bank in enumerate(NEPAL_BANKS):
-        if i % 3 == 0 and i > 0:
-            keyboard.append(row)
-            row = []
-        row.append(InlineKeyboardButton(bank, callback_data=f"select_bank_{i}"))
-    
-    # Add user's custom banks if any
-    if user_id in user_custom_banks and user_custom_banks[user_id]:
-        # Add a separator row if there are default banks
-        if row:
-            keyboard.append(row)
-            row = []
-        
-        # Add a header for custom banks
-        keyboard.append([InlineKeyboardButton("───────── YOUR CUSTOM BANKS ─────────", callback_data="custom_bank_header")])
-        
-        # Add custom banks (3 per row)
-        for i, bank in enumerate(user_custom_banks[user_id]):
-            if i % 3 == 0 and i > 0:
-                keyboard.append(row)
-                row = []
-            # Use a different prefix for custom banks to distinguish them
-            row.append(InlineKeyboardButton(f"🔶 {bank}", callback_data=f"select_custom_bank_{i}"))
-    
-    if row:  # Add any remaining buttons
-        keyboard.append(row)
-    
-    # Add a Done button to exit the bank selection process
-    keyboard.append([InlineKeyboardButton("✅ Done", callback_data="done_bank_selection")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # Ask for remaining balance first if not already set
-    if 'remaining_balance' not in user_states[user_id]:
-        update.callback_query.edit_message_text(
-            "💰 <b>Please enter your remaining balance first:</b>\n\n"
-            "This will be used as your starting balance.\n\n"
-            "Enter 0 if you don't want to include a remaining balance.",
+def ask_for_deposit_info(update: Update, context) -> None:
+    """Ask the user for deposit amount, bank name, and remaining balance.
+    Supports multiple bank deposits for the same day and improved balance tracking."""
+    user_id = update.effective_user.id
+    message = update.message
+
+    # Initialize user state if not already set
+    if user_id not in user_states:
+        user_states[user_id] = {
+            'state': 'waiting_for_remaining_balance',
+            'action': 'csv_export',
+            'remaining_balance': None,
+            'bank_deposits': [],
+            'current_bank': None,
+            'csv_path': None,
+            'total_deposits': 0.0,
+            'total_paid': 0.0
+        }
+
+    user_state = user_states[user_id]
+
+    # Handle different states
+    if user_state['state'] == 'waiting_for_remaining_balance':
+        try:
+            remaining_balance = float(message.text)
+            user_state['remaining_balance'] = remaining_balance
+            user_state['state'] = 'waiting_for_bank_selection'
+            user_state['total_deposits'] = remaining_balance
+            message.reply_text(
+                f"<b>Step 2: Select a bank for your deposit</b>\n\n"
+                f"Choose a bank from the list below. After selecting a bank, you'll be asked to enter the deposit amount.\n\n"
+                f"When you've finished adding all your bank deposits, click 'Finish and Export CSV'.",
+                parse_mode='HTML'
+            )
+            show_bank_selection_with_done(update, context)
+        except ValueError:
+            message.reply_text(
+                "❗ Invalid input. Please enter a valid number for the remaining balance."
+            )
+    elif user_state['state'] == 'waiting_for_bank_selection':
+        # User selected a bank from the list
+        selected_bank = message.text
+        user_state['current_bank'] = selected_bank
+        user_state['state'] = 'waiting_for_deposit_amount'
+        message.reply_text(
+            f"<b>Step 4: Enter deposit amount for {selected_bank}</b>\n\n"
+            f"Please enter the deposit amount for this bank:",
             parse_mode='HTML'
         )
-        user_states[user_id]['state'] = 'waiting_for_remaining_balance'
-    else:
-        update.callback_query.edit_message_text(
-            "🏦 Please select a bank or click Done when finished:",
-            reply_markup=reply_markup
+    elif user_state['state'] == 'waiting_for_deposit_amount':
+        try:
+            deposit_amount = float(message.text)
+            user_state['bank_deposits'].append({
+                'bank': user_state['current_bank'],
+                'amount': deposit_amount
+            })
+            user_state['total_deposits'] += deposit_amount
+            user_state['state'] = 'waiting_for_bank_selection'
+            message.reply_text(
+                f"<b>Deposit of {deposit_amount:.2f} added for {user_state['current_bank']}</b>\n\n"
+                f"<b>Current deposits:</b>\n"
+                f"{', '.join([f'{d['bank']}: {d['amount']:.2f}' for d in user_state['bank_deposits']])}\n\n"
+                f"<b>Total:</b> {user_state['total_deposits']:.2f}\n\n"
+                f"You can add more banks or click 'Finish and Export CSV' when you're done.",
+                parse_mode='HTML'
+            )
+            show_bank_selection_with_done(update, context)
+        except ValueError:
+            message.reply_text(
+                "❗ Invalid input. Please enter a valid number for the deposit amount."
+            )
+    elif user_state['state'] == 'waiting_for_csv_path':
+        # User is providing CSV file path or choice
+        if message.text.lower() == '1':
+            # User wants to append to an existing file
+            message.reply_text(
+                "📝 <b>Step 7: Enter CSV file path</b>\n\n"
+                "Please enter the full path to your CSV file. For example:\n"
+                "/path/to/your/file.csv\n\n"
+                "<b>Note:</b> This will append to the existing file.",
+                parse_mode='HTML'
+            )
+            user_state['state'] = 'waiting_for_csv_file_path'
+        elif message.text.lower() == '2':
+            # User wants to create a new file
+            user_state['csv_path'] = None
+            user_state['state'] = 'waiting_for_csv_export_confirmation'
+            message.reply_text(
+                "📝 <b>Step 7: Confirm CSV export</b>\n\n"
+                "You've chosen to create a new CSV file. Click the button below to confirm and generate your file.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Confirm and Export CSV", callback_data="confirm_csv_export")]]),
+                parse_mode='HTML'
+            )
+        else:
+            # Assume user entered a file path
+            user_state['csv_path'] = message.text
+            user_state['state'] = 'waiting_for_csv_export_confirmation'
+            message.reply_text(
+                f"📝 <b>Step 7: Confirm CSV export</b>\n\n"
+                f"You've entered the following CSV file path:\n"
+                f"{user_state['csv_path']}\n\n"
+                f"Click the button below to confirm and generate your file.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Confirm and Export CSV", callback_data="confirm_csv_export")]]),
+                parse_mode='HTML'
+            )
+    elif user_state['state'] == 'waiting_for_csv_file_path':
+        # User entered a CSV file path
+        user_state['csv_path'] = message.text
+        user_state['state'] = 'waiting_for_csv_export_confirmation'
+        message.reply_text(
+            f"📝 <b>Step 7: Confirm CSV export</b>\n\n"
+            f"You've entered the following CSV file path:\n"
+            f"{user_state['csv_path']}\n\n"
+            f"Click the button below to confirm and generate your file.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Confirm and Export CSV", callback_data="confirm_csv_export")]]),
+            parse_mode='HTML'
         )
+    elif user_state['state'] == 'waiting_for_csv_export_confirmation':
+        # User confirmed CSV export
+        process_export_csv(update, context)
 
-def start_remaining_limit_check(update: Update, context) -> None:
-    """Start the process of checking remaining limit for a bank."""
-    user_id = update.callback_query.from_user.id
+def process_export_csv(update: Update, context, use_manual_input=False) -> None:
+    """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Remaining Balance."""
+    # Determine if this is called from a callback query or directly
+    if hasattr(update, 'callback_query') and update.callback_query is not None:
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
     
-    # Initialize user state
-    user_states[user_id] = {
-        'state': 'selecting_bank',
-        'action': 'limit_check'
-    }
-    
-    # Create a keyboard with Nepali banks and user's custom banks
-    keyboard = []
-    row = []
-    
-    # Add default Nepali banks in a more organized way (3 per row)
-    for i, bank in enumerate(NEPAL_BANKS):
-        if i % 3 == 0 and i > 0:
-            keyboard.append(row)
-            row = []
-        row.append(InlineKeyboardButton(bank, callback_data=f"select_bank_{i}"))
-    
-    # Add user's custom banks if any
-    if user_id in user_custom_banks and user_custom_banks[user_id]:
-        # Add a separator row if there are default banks
-        if row:
-            keyboard.append(row)
-            row = []
-        
-        # Add a header for custom banks
-        keyboard.append([InlineKeyboardButton("───────── YOUR CUSTOM BANKS ─────────", callback_data="custom_bank_header")])
-        
-        # Add custom banks (3 per row)
-        for i, bank in enumerate(user_custom_banks[user_id]):
-            if i % 3 == 0 and i > 0:
-                keyboard.append(row)
-                row = []
-            # Use a different prefix for custom banks to distinguish them
-            row.append(InlineKeyboardButton(f"🔶 {bank}", callback_data=f"select_custom_bank_{i}"))
-    
-    if row:  # Add any remaining buttons
-        keyboard.append(row)
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    update.callback_query.edit_message_text(
-        "🏦 Please select a bank to check remaining limit:",
-        reply_markup=reply_markup
-    )
+    # Get user preferences
+    preferences = user_preferences.get(user_id, DEFAULT_PREFERENCES.copy())
+    decimal_separator = preferences['decimal_separator']
 
-def start_add_custom_bank(update: Update, context) -> None:
-    """Start the process of adding a custom bank."""
-    user_id = update.callback_query.from_user.id
-    
-    # Initialize user state
-    user_states[user_id] = {
-        'state': 'waiting_for_custom_bank_name',
-        'action': 'add_custom_bank'
-    }
-    
-    update.callback_query.edit_message_text(
-        "🏦 Please enter the name of the custom bank you want to add:"
-    )
+    # Create the appropriate pattern based on user preference
+    if decimal_separator == '.':
+        pattern = r'([€$£¥])?(\-?\d+(?:\.\d+)?)'
+    else:
+        pattern = r'([€$£¥])?(\-?\d+(?:,\d+)?)'
+
+    amounts = []
+    charges = []
+
+    # Process all collected messages
+    for message_data in user_messages[user_id]:
+        message_text = message_data['text']
+
+        # Find all matches in the message
+        matches = re.findall(pattern, message_text)
+
+        for match in matches:
+            currency, original_number, processed_number, value, has_decimal = extract_number_value(match, decimal_separator, message_text)
+
+            # Format the extracted value
+            extracted_value = f"{currency}{processed_number}" if currency and preferences['include_currency'] else processed_number
+
+            # Add to appropriate category
+            if value > AMOUNT_THRESHOLD:
+                amounts.append(extracted_value)
+            else:
+                charges.append(extracted_value)
+
+    if not amounts and not charges:
+        message.reply_text(
+            f"❗ I couldn't find any numbers in your collected messages."
+        )
+        return
+
+    # Calculate the sum of all values
+    total_sum = 0
+    for value_list in [amounts, charges]:
+        for value_str in value_list:
+            # Remove any currency symbol
+            numeric_str = re.sub(r'[€$£¥]', '', value_str)
+            # Replace comma with period if needed
+            if decimal_separator == ',':
+                numeric_str = numeric_str.replace(',', '.')
+            # Convert to float and add to sum
+            try:
+                total_sum += float(numeric_str)
+            except ValueError:
+                # Skip if conversion fails
+                pass
+
+    # Get user state
+    user_state = user_states[user_id]
+
+    # Get bank deposits and remaining balance
+    bank_deposits = user_state['bank_deposits']
+    remaining_balance = user_state['remaining_balance']
+
+    # Get CSV file path
+    csv_path = user_state['csv_path']
+
+    # Determine if the file exists
+    file_exists = False
+    if csv_path:
+        file_exists = os.path.isfile(csv_path)
+
+    # Create a new filename if not provided
+    if not csv_path:
+        current_date = datetime.now().strftime('%Y-%m-%d')
+        month_name = datetime.now().strftime('%B')
+        filename = f"decimal_stripper_export_{month_name}.csv"
+    else:
+        filename = csv_path
+
+    try:
+        if file_exists:
+            # Read existing file and append new data
+            with open(filename, 'r', newline='', encoding='utf-8') as csvfile:
+                reader = csv.reader(csvfile)
+                existing_data = list(reader)
+
+            # Check if the file has the expected header
+            expected_header = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Total Deposit', 'Remaining Balance']
+            if existing_data[0] != expected_header:
+                message.reply_text(
+                    f"❗ The provided CSV file does not have the expected header. Please make sure it matches the format: {', '.join(expected_header)}"
+                )
+                return
+
+            # Append new data
+            mode = 'a'
+        else:
+            # Create new file
+            mode = 'w'
+        
+        with open(filename, mode, newline='', encoding='utf-8') as csvfile:
+            # Create writer
+            writer = csv.writer(csvfile)
+            
+            # Write header if creating a new file
+            if not file_exists:
+                fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Total Deposit', 'Remaining Balance']
+                writer.writerow(fieldnames)
+            
+            # If we have manually entered bank deposits, write each one
+            if bank_deposits:
+                # Sort deposits to ensure Previous Balance comes first if it exists
+                sorted_deposits = sorted(bank_deposits, key=lambda x: 0 if x['bank'] == 'Previous Balance' else 1)
+                
+                for i, deposit in enumerate(sorted_deposits):
+                    bank_name = deposit['bank']
+                    deposit_amount = deposit['amount']
+                    
+                    # Format the deposit amount with two decimal places
+                    deposit_amount_formatted = f"{float(deposit_amount):.2f}"
+                    
+                    # Write the deposit information
+                    # Only include date in the first row
+                    if i == 0:
+                        deposit_row = [current_date, deposit_amount_formatted, bank_name, '', '', '']
+                    else:
+                        deposit_row = ['', deposit_amount_formatted, bank_name, '', '', '']
+                    writer.writerow(deposit_row)
+            else:
+                # No manually entered deposits, use the first amount from extracted data
+                deposit_amount_formatted = ''
+                if amounts and amounts[0]:
+                    try:
+                        # Remove any currency symbol and convert to float
+                        numeric_str = re.sub(r'[€$£¥]', '', amounts[0])
+                        # Handle both decimal separators
+                        if decimal_separator == ',':
+                            numeric_str = numeric_str.replace(',', '.')
+                        # Always format with 2 decimal places for consistency
+                        deposit_amount_formatted = f"{float(numeric_str):.2f}"
+                    except ValueError:
+                        deposit_amount_formatted = amounts[0]
+                
+                # Write the deposit information in the first row
+                deposit_row = [current_date, deposit_amount_formatted, "Remaining Balance", '', '', '']
+                writer.writerow(deposit_row)
+            
+            # Process amounts and charges together for Paid To Host column
+            running_paid = 0.0
+            running_total = 0.0
+            
+            # Process amounts and charges together
+            max_rows = max(len(amounts), len(charges))
+            for i in range(max_rows):
+                amount_value = 0.0
+                charge_value = 0.0
+                
+                # Get amount if available
+                if i < len(amounts):
+                    try:
+                        # Remove any currency symbol and convert to float
+                        numeric_str = re.sub(r'[€$£¥]', '', amounts[i])
+                        # Handle both decimal separators
+                        if decimal_separator == ',':
+                            numeric_str = numeric_str.replace(',', '.')
+                        amount_value = float(numeric_str)
+                    except ValueError:
+                        amount_value = 0.0
+                
+                # Get charge if available
+                if i < len(charges):
+                    try:
+                        # Remove any currency symbol and convert to float
+                        numeric_str = re.sub(r'[€$£¥]', '', charges[i])
+                        # Handle both decimal separators
+                        if decimal_separator == ',':
+                            numeric_str = numeric_str.replace(',', '.')
+                        charge_value = float(numeric_str)
+                    except ValueError:
+                        charge_value = 0.0
+                
+                # Calculate row total (amount + charge)
+                row_total = amount_value + charge_value
+                running_total += row_total
+                running_paid += charge_value
+                
+                # Write the row with the sum in Paid To Host column
+                if amount_value != 0 or charge_value != 0:
+                    row = ['', '', '', f"{row_total:.2f}", '', '']
+                    writer.writerow(row)
+            
+            # Add empty row before totals
+            writer.writerow(['', '', '', '', '', ''])
+            
+            # Calculate final totals
+            total_deposit = sum(deposit['amount'] for deposit in bank_deposits) if bank_deposits else 0
+            total_paid = running_paid
+            remaining_balance = total_deposit - total_paid
+            
+            # Write the totals row at the bottom
+            writer.writerow(['', '', '', '', '', ''])  # Empty row for spacing
+            totals_row = ['', 'SUMMARY', '', f"Total Paid: {total_paid:.2f}", f"Total Deposit: {total_deposit:.2f}", f"Remaining Balance: {remaining_balance:.2f}"]
+            writer.writerow(totals_row)
+            
+            # Add a footer with additional information
+            writer.writerow(['', '', '', '', '', ''])  # Empty row for spacing
+            writer.writerow(['', 'Report generated on:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '', '', ''])
+            if bank_deposits:
+                writer.writerow(['', 'Banks included:', ', '.join([deposit['bank'] for deposit in bank_deposits]), '', '', ''])
+
+        # Send the file to the user with improved caption
+        with open(filename, 'rb') as file:
+            message.reply_document(
+                document=file,
+                filename=os.path.basename(filename),
+                caption=f"📊 Enhanced CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Remaining Balance.\n\nThe file includes:\n- Bank deposits with their respective amounts ({len(bank_deposits)} banks included)\n- Running sums of amounts and charges in the Paid To Host column\n- Total deposit and remaining balance calculations\n- Previous balance of {remaining_balance:.2f} included in calculations\n- Final remaining balance: {remaining_balance:.2f}"
+            )
+
+        # Don't remove the file if it's a user-specified path
+        if not csv_path:
+            os.remove(filename)
+
+        # Clear the conversation state
+        if user_id in user_states:
+            del user_states[user_id]
+
+    except Exception as e:
+        logger.error(f"Error exporting CSV: {e}")
+        message.reply_text(
+            f"❗ Sorry, there was an error creating your CSV file: {str(e)}"
+        )
+        
+        # Clear the conversation state on error
+        if user_id in user_states:
+            del user_states[user_id]
 
 def main():
     """Start the bot with enhanced instance management."""
@@ -2419,10 +2223,6 @@ def main():
         dp.add_handler(CommandHandler("start", start))
         dp.add_handler(CommandHandler("help", help_command))
         dp.add_handler(CommandHandler("process", process_command))
-        dp.add_handler(CommandHandler("clear", clear_command))
-        dp.add_handler(CommandHandler("settings", settings_command))
-        dp.add_handler(CommandHandler("export_csv", export_csv))
-        dp.add_handler(CommandHandler("export_json", export_json))
         dp.add_handler(CommandHandler("stats", stats_command))
         dp.add_handler(CallbackQueryHandler(button_callback))
         dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_conversation))
