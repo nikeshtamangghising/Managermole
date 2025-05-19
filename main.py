@@ -2547,7 +2547,7 @@ def create_socket_lock():
         
         # Add SO_EXCLUSIVEADDRUSE on Windows to ensure exclusive access
         if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
-            lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            lock_socket.setsockopt(socket.SOL_SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         
         # Set socket to non-blocking mode to prevent hanging
         lock_socket.setblocking(False)
