@@ -2422,11 +2422,10 @@ def main():
         except:
             pass
         
-        # Create updater with longer timeouts
+        # Create updater with correct timeout parameters
         updater = Updater(BOT_TOKEN, request_kwargs={
             'read_timeout': 90,
-            'connect_timeout': 120,
-            'write_timeout': 90
+            'connect_timeout': 120
         })
         bot_updater = updater
         
@@ -2443,7 +2442,7 @@ def main():
         dp.add_handler(CallbackQueryHandler(button_callback))
         dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_conversation))
         dp.add_error_handler(error_handler)
-        
+
         # Start keep-alive
         keep_alive()
         
@@ -2470,7 +2469,6 @@ def main():
                     allowed_updates=['message', 'callback_query', 'chat_member'],
                     bootstrap_retries=5,  # More bootstrap retries
                     read_timeout=90,
-                    write_timeout=90,
                     connect_timeout=120
                 )
                 
@@ -2492,7 +2490,7 @@ def main():
                     if hasattr(dp, '_update_fetcher'):
                         if hasattr(dp._update_fetcher, 'running'):
                             dp._update_fetcher.running = False
-                        dp._update_fetcher._last_update_id = 0
+                            dp._update_fetcher._last_update_id = 0
                         
                     # Force cleanup of any remaining sockets
                     for sock in [s for s in socket.socket() if s.fileno() > 0]:
@@ -2507,7 +2505,7 @@ def main():
                 if retry_count >= max_retries:
                     logging.error("Maximum retry attempts reached")
                     return
-                
+                    
                 # Longer backoff with more randomization
                 backoff_time = backoff_time * 2 + random.uniform(0, 10)
                 logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt")
@@ -2526,7 +2524,7 @@ def main():
                 if retry_count >= max_retries:
                     logging.error("Maximum retry attempts reached")
                     return
-        
+
         # Run the bot
         logging.info("Bot is now running")
         updater.idle()
