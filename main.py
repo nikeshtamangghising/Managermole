@@ -198,32 +198,32 @@ def graceful_shutdown(updater=None, lock_socket=None):
     SHUTDOWN_IN_PROGRESS = True
     logging.info("Starting graceful shutdown...")
     
-    try:
+        try:
         # First, try to delete webhook
         if updater and hasattr(updater, 'bot'):
-            try:
-                updater.bot.delete_webhook(drop_pending_updates=True)
-                logging.info("Deleted webhook during shutdown")
+                try:
+                    updater.bot.delete_webhook(drop_pending_updates=True)
+                    logging.info("Deleted webhook during shutdown")
             except:
                 pass
-        
+            
         # Stop the updater
         if updater:
             try:
-                updater.stop()
+            updater.stop()
                 logging.info("Stopped updater")
             except:
                 pass
         
         # Release thread lock
-        if BOT_INSTANCE_LOCK.locked():
-            BOT_INSTANCE_LOCK.release()
+    if BOT_INSTANCE_LOCK.locked():
+        BOT_INSTANCE_LOCK.release()
             logging.info("Released thread lock")
-        
+    
         # Close socket lock
-        if lock_socket:
-            try:
-                lock_socket.close()
+    if lock_socket:
+        try:
+            lock_socket.close()
                 logging.info("Closed socket lock")
             except:
                 pass
@@ -242,7 +242,7 @@ def graceful_shutdown(updater=None, lock_socket=None):
     except Exception as e:
         logging.error(f"Error during shutdown: {e}")
     finally:
-        SHUTDOWN_IN_PROGRESS = False
+    SHUTDOWN_IN_PROGRESS = False
         logging.info("Shutdown complete")
 
 def error_handler(update, context):
@@ -896,14 +896,14 @@ def handle_conversation(update: Update, context) -> None:
             f"Please enter the deposit amount for {bank_name}:"
         )
         return
-
+    
     elif state == 'waiting_for_bank_name':
         # User is entering a custom bank name for this transaction
         bank_name = text.strip()
         
         # Check if bank already exists in default list
         if bank_name in NEPAL_BANKS:
-            update.message.reply_text(
+        update.message.reply_text(
                 f"❗ '{bank_name}' already exists in the default bank list. Please enter a different name:"
             )
             return
@@ -911,12 +911,12 @@ def handle_conversation(update: Update, context) -> None:
         # Set the current bank and transition to deposit amount entry
         user_states[user_id]['current_bank'] = bank_name
         user_states[user_id]['state'] = 'waiting_for_deposit_amount'
-        
-        update.message.reply_text(
+            
+            update.message.reply_text(
             f"✅ Bank name '{bank_name}' has been set.\n\n"
             f"Please enter the deposit amount for {bank_name}:"
-        )
-        return
+            )
+            return
     
     elif state == 'waiting_for_deposit_amount':
         # Try to parse the deposit amount
@@ -956,23 +956,14 @@ def handle_conversation(update: Update, context) -> None:
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             # Show summary of current deposits with improved formatting
-            deposits_list = []
-            for d in user_states[user_id]['bank_deposits']:
-                bank_name = d['bank']
-                amount = d['amount']
-                deposits_list.append(bank_name + ": " + f"{amount:.2f}")
-            deposits_summary = ", ".join(deposits_list)
+            deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
             
-            message = (
+            update.message.reply_text(
                 f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
                 f"<b>Current deposits:</b>\n{deposits_summary}\n\n"
                 f"<b>Running total:</b> {user_states[user_id]['total_deposits']:.2f}\n"
                 f"<b>Current balance:</b> {current_balance:.2f}\n\n"
-                f"<b>Would you like to add another bank deposit or finish?</b>"
-            )
-            
-            update.message.reply_text(
-                message,
+                f"<b>Would you like to add another bank deposit or finish?</b>",
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
@@ -1005,9 +996,9 @@ def handle_conversation(update: Update, context) -> None:
             show_bank_selection_with_done(update, context)
             
         except ValueError:
-            update.message.reply_text(
+        update.message.reply_text(
                 "❗ Invalid number format. Please enter a valid number for the remaining balance:"
-            )
+        )
     
     elif state == 'waiting_for_csv_path':
         if text == '1':
@@ -1583,14 +1574,14 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
                 
                 # Get charge if available
                 if i < len(charges):
-                    try:
-                        # Remove any currency symbol and convert to float
-                        numeric_str = re.sub(r'[€$£¥]', '', charges[i])
-                        # Handle both decimal separators
-                        if decimal_separator == ',':
-                            numeric_str = numeric_str.replace(',', '.')
-                        charge_value = float(numeric_str)
-                    except ValueError:
+                try:
+                    # Remove any currency symbol and convert to float
+                    numeric_str = re.sub(r'[€$£¥]', '', charges[i])
+                    # Handle both decimal separators
+                    if decimal_separator == ',':
+                        numeric_str = numeric_str.replace(',', '.')
+                    charge_value = float(numeric_str)
+                except ValueError:
                         charge_value = 0.0
                 
                 # Calculate row total (amount + charge)
@@ -1815,7 +1806,7 @@ def ask_for_deposit_info(update: Update, context) -> None:
 
     # Initialize user state if not already set
     if user_id not in user_states:
-        user_states[user_id] = {
+    user_states[user_id] = {
             'state': 'waiting_for_remaining_balance',
             'action': 'csv_export',
             'remaining_balance': None,
@@ -1839,8 +1830,8 @@ def ask_for_deposit_info(update: Update, context) -> None:
                 f"<b>Step 2: Select a bank for your deposit</b>\n\n"
                 f"Choose a bank from the list below. After selecting a bank, you'll be asked to enter the deposit amount.\n\n"
                 f"When you've finished adding all your bank deposits, click 'Finish and Export CSV'.",
-                parse_mode='HTML'
-            )
+            parse_mode='HTML'
+        )
             show_bank_selection_with_done(update, context)
         except ValueError:
             message.reply_text(
@@ -1900,7 +1891,7 @@ def ask_for_deposit_info(update: Update, context) -> None:
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Confirm and Export CSV", callback_data="confirm_csv_export")]]),
                 parse_mode='HTML'
             )
-        else:
+    else:
             # Assume user entered a file path
             user_state['csv_path'] = message.text
             user_state['state'] = 'waiting_for_csv_export_confirmation'
@@ -1932,7 +1923,7 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Remaining Balance."""
     # Determine if this is called from a callback query or directly
     if hasattr(update, 'callback_query') and update.callback_query is not None:
-        user_id = update.callback_query.from_user.id
+    user_id = update.callback_query.from_user.id
         message = update.callback_query.message
     else:
         user_id = update.effective_user.id
@@ -1975,7 +1966,7 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             f"❗ I couldn't find any numbers in your collected messages."
         )
         return
-
+    
     # Calculate the sum of all values
     total_sum = 0
     for value_list in [amounts, charges]:
@@ -2012,7 +2003,7 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
         current_date = datetime.now().strftime('%Y-%m-%d')
         month_name = datetime.now().strftime('%B')
         filename = f"decimal_stripper_export_{month_name}.csv"
-    else:
+                else:
         filename = csv_path
 
     try:
@@ -2032,7 +2023,7 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
 
             # Append new data
             mode = 'a'
-        else:
+            else:
             # Create new file
             mode = 'w'
         
@@ -2071,9 +2062,9 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
                     try:
                         # Remove any currency symbol and convert to float
                         numeric_str = re.sub(r'[€$£¥]', '', amounts[0])
-                        # Handle both decimal separators
+            # Handle both decimal separators
                         if decimal_separator == ',':
-                            numeric_str = numeric_str.replace(',', '.')
+                numeric_str = numeric_str.replace(',', '.')
                         # Always format with 2 decimal places for consistency
                         deposit_amount_formatted = f"{float(numeric_str):.2f}"
                     except ValueError:
@@ -2102,17 +2093,17 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
                         if decimal_separator == ',':
                             numeric_str = numeric_str.replace(',', '.')
                         amount_value = float(numeric_str)
-                    except ValueError:
+        except ValueError:
                         amount_value = 0.0
-                
+    
                 # Get charge if available
                 if i < len(charges):
-                    try:
+        try:
                         # Remove any currency symbol and convert to float
                         numeric_str = re.sub(r'[€$£¥]', '', charges[i])
-                        # Handle both decimal separators
+            # Handle both decimal separators
                         if decimal_separator == ',':
-                            numeric_str = numeric_str.replace(',', '.')
+                numeric_str = numeric_str.replace(',', '.')
                         charge_value = float(numeric_str)
                     except ValueError:
                         charge_value = 0.0
@@ -2159,18 +2150,18 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             os.remove(filename)
 
         # Clear the conversation state
-        if user_id in user_states:
-            del user_states[user_id]
+                    if user_id in user_states:
+                        del user_states[user_id]
 
-    except Exception as e:
+            except Exception as e:
         logger.error(f"Error exporting CSV: {e}")
         message.reply_text(
             f"❗ Sorry, there was an error creating your CSV file: {str(e)}"
         )
         
-        # Clear the conversation state on error
-        if user_id in user_states:
-            del user_states[user_id]
+                # Clear the conversation state on error
+                if user_id in user_states:
+                    del user_states[user_id]
 
 def main():
     """Start the bot with enhanced instance management."""
@@ -2184,7 +2175,7 @@ def main():
         kill_socket.send(b'kill')
         kill_socket.close()
         time.sleep(5)
-    except:
+                except:
         pass
     
     # Get socket lock
@@ -2277,7 +2268,7 @@ def main():
                         updater.bot.delete_webhook(drop_pending_updates=True)
                     
                     if hasattr(updater, 'stop'):
-                        updater.stop()
+                            updater.stop()
                     
                     if hasattr(dp, '_update_fetcher'):
                         if hasattr(dp._update_fetcher, 'running'):
