@@ -2462,14 +2462,12 @@ def main():
                 if hasattr(dp, '_update_fetcher'):
                     dp._update_fetcher._last_update_id = 0
                 
-                # Start polling with improved settings
+                # Start polling with correct parameters
                 updater.start_polling(
                     timeout=120,  # Longer timeout
                     drop_pending_updates=True,
                     allowed_updates=['message', 'callback_query', 'chat_member'],
-                    bootstrap_retries=5,  # More bootstrap retries
-                    read_timeout=90,
-                    connect_timeout=120
+                    bootstrap_retries=5  # More bootstrap retries
                 )
                 
                 logging.info("Bot started successfully")
