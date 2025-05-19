@@ -2527,6 +2527,17 @@ def create_socket_lock():
     lock_socket_name = "managermole_bot_instance_lock"
     lock_port = 10001  # Use port 10001 to avoid conflicts with the web server
     
+    # First try to clean up any existing instances
+    try:
+        cleanup_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        cleanup_socket.settimeout(1)
+        cleanup_socket.connect(('localhost', lock_port))
+        cleanup_socket.send(b'cleanup')
+        cleanup_socket.close()
+        time.sleep(2)  # Wait for cleanup
+    except:
+        pass  # Ignore errors during cleanup attempt
+    
     # Create a new socket for locking
     lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
@@ -2592,7 +2603,7 @@ def main():
     
     # Add a delay to ensure any previous instance has fully released resources
     logging.info("Acquired all locks successfully, waiting for resources to be fully available...")
-    time.sleep(10)  # Increased delay for better resource cleanup
+    time.sleep(15)  # Increased delay for better resource cleanup
     
     # Variable to track the updater for proper cleanup
     updater = None
@@ -2611,14 +2622,14 @@ def main():
             cleanup_bot.delete_webhook(drop_pending_updates=True)
             logging.info("Pre-startup cleanup: Deleted any existing webhooks")
             # Wait for Telegram servers to process the webhook deletion
-            time.sleep(5)
+            time.sleep(10)  # Increased wait time
             del cleanup_bot  # Remove the temporary bot instance
         except Exception as pre_cleanup_error:
             logging.warning(f"Pre-startup cleanup failed: {pre_cleanup_error}")
             # Continue anyway - this is just a precaution
             
         # Create the Updater with a longer timeout
-        updater = Updater(BOT_TOKEN, request_kwargs={'read_timeout': 40, 'connect_timeout': 60})
+        updater = Updater(BOT_TOKEN, request_kwargs={'read_timeout': 60, 'connect_timeout': 90})
         bot_updater = updater  # Set global variable for signal handler
 
         # Get the dispatcher to register handlers
@@ -2649,9 +2660,9 @@ def main():
             logging.warning("Keep alive server failed to start, but continuing with bot operation")
 
         # Start the Bot with improved conflict prevention
-        max_retries = 8  # Increased number of retries
+        max_retries = 12  # Increased number of retries
         retry_count = 0
-        backoff_time = 8  # Initial backoff time in seconds
+        backoff_time = 15  # Increased initial backoff time
         
         while retry_count < max_retries:
             try:
@@ -2663,7 +2674,7 @@ def main():
                 logging.info("Webhook deleted and pending updates dropped")
                 
                 # Wait for Telegram servers to process the webhook deletion
-                time.sleep(5)  # Increased wait time
+                time.sleep(10)  # Increased wait time
                 
                 # Reset the update fetcher state if it exists
                 if hasattr(dp, '_update_fetcher') and hasattr(dp._update_fetcher, '_last_update_id'):
@@ -2672,7 +2683,7 @@ def main():
                 
                 # Start polling with improved settings
                 updater.start_polling(
-                    timeout=60,  # Increased timeout
+                    timeout=90,  # Increased timeout
                     drop_pending_updates=True,  # Ignore old messages
                     allowed_updates=['message', 'callback_query', 'chat_member']  # Specify updates we care about
                 )
@@ -2712,7 +2723,7 @@ def main():
                     return
                     
                 # Exponential backoff between retries with some randomization
-                backoff_time = backoff_time * 1.5 + random.uniform(0, 3)
+                backoff_time = backoff_time * 1.5 + random.uniform(0, 5)
                 logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt...")
                 time.sleep(backoff_time)
             except Exception as e:
