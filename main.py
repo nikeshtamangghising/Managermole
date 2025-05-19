@@ -122,61 +122,118 @@ BOT_INSTANCE_LOCK = threading.Lock()
 # Flag to track if shutdown is in progress
 SHUTDOWN_IN_PROGRESS = False
 
-# Function to handle graceful shutdown
-def graceful_shutdown(updater=None, lock_socket=None):
-    """Perform a graceful shutdown of the bot.
+def create_socket_lock():
+    """Create a socket-based lock to ensure only one instance of the bot runs."""
+    lock_port = 10001
     
-    Args:
-        updater: The bot updater instance
-        lock_socket: The socket lock
-    """
+    # First, try to kill any existing instances
+    try:
+        kill_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        kill_socket.settimeout(1)
+        kill_socket.connect(('localhost', lock_port))
+        kill_socket.send(b'kill')
+        kill_socket.close()
+        time.sleep(5)
+    except:
+        pass
+    
+    # Create a new socket for locking
+    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    
+    try:
+        # Set socket options for better exclusivity
+        lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        
+        # Set socket to non-blocking mode
+        lock_socket.setblocking(False)
+        
+        # Try to bind to the lock port
+        lock_socket.bind(('localhost', lock_port))
+        
+        # Set a longer timeout
+        lock_socket.settimeout(60)
+        
+        # Start a more robust heartbeat mechanism
+        def keep_socket_alive():
+            while True:
+                try:
+                    lock_socket.sendto(b'heartbeat', ('localhost', lock_port))
+                    time.sleep(5)  # More frequent heartbeats
+                except:
+                    break
+        
+        heartbeat_thread = threading.Thread(target=keep_socket_alive, daemon=True)
+        heartbeat_thread.start()
+        
+        logging.info("Successfully acquired socket lock")
+        return lock_socket
+    except socket.error as e:
+        logging.error(f"Failed to acquire socket lock: {e}")
+        try:
+            lock_socket.close()
+        except:
+            pass
+        return None
+
+def graceful_shutdown(updater=None, lock_socket=None):
+    """Perform a graceful shutdown of the bot."""
     global SHUTDOWN_IN_PROGRESS
     
-    # Set shutdown flag to prevent multiple shutdown attempts
     if SHUTDOWN_IN_PROGRESS:
-        logging.info("Shutdown already in progress, skipping duplicate shutdown")
         return
         
     SHUTDOWN_IN_PROGRESS = True
-    logging.info("Starting graceful shutdown sequence...")
+    logging.info("Starting graceful shutdown...")
     
-    # Stop the updater if it was created and started
-    if updater is not None:
+    try:
+        # First, try to delete webhook
+        if updater and hasattr(updater, 'bot'):
+            try:
+                updater.bot.delete_webhook(drop_pending_updates=True)
+                logging.info("Deleted webhook during shutdown")
+            except:
+                pass
+        
+        # Stop the updater
+        if updater:
+            try:
+                updater.stop()
+                logging.info("Stopped updater")
+            except:
+                pass
+        
+        # Release thread lock
+        if BOT_INSTANCE_LOCK.locked():
+            BOT_INSTANCE_LOCK.release()
+            logging.info("Released thread lock")
+        
+        # Close socket lock
+        if lock_socket:
+            try:
+                lock_socket.close()
+                logging.info("Closed socket lock")
+            except:
+                pass
+        
+        # Additional cleanup
         try:
-            logging.info("Stopping updater...")
-            # First try to delete webhook to ensure clean shutdown
-            if hasattr(updater, 'bot') and hasattr(updater.bot, 'delete_webhook'):
+            # Force cleanup of any remaining sockets
+            for sock in [s for s in socket.socket() if s.fileno() > 0]:
                 try:
-                    updater.bot.delete_webhook(drop_pending_updates=True)
-                    logging.info("Deleted webhook during shutdown")
-                except Exception as webhook_error:
-                    logging.error(f"Error deleting webhook during shutdown: {webhook_error}")
+                    sock.close()
+                except:
+                    pass
+        except:
+            pass
             
-            # Now stop the updater
-            updater.stop()
-            logging.info("Updater stopped successfully")
-        except Exception as e:
-            logging.error(f"Error stopping updater: {e}")
-    
-    # Release the thread lock
-    if BOT_INSTANCE_LOCK.locked():
-        logging.info("Releasing thread lock...")
-        BOT_INSTANCE_LOCK.release()
-        logging.info("Thread lock released")
-    
-    # Close the socket lock
-    if lock_socket:
-        try:
-            logging.info("Closing socket lock...")
-            lock_socket.close()
-            logging.info("Socket lock closed")
-        except Exception as e:
-            logging.error(f"Error closing socket lock: {e}")
-    
-    logging.info("Graceful shutdown complete")
-    SHUTDOWN_IN_PROGRESS = False
+    except Exception as e:
+        logging.error(f"Error during shutdown: {e}")
+    finally:
+        SHUTDOWN_IN_PROGRESS = False
+        logging.info("Shutdown complete")
 
-# Function to handle errors
 def error_handler(update, context):
     """Handle errors in the dispatcher with improved conflict resolution."""
     try:
@@ -865,13 +922,34 @@ def handle_conversation(update: Update, context) -> None:
         # Add the custom bank
         user_custom_banks[user_id].append(bank_name)
         
-        # Clear the conversation state
-        del user_states[user_id]
+        # Set the current bank and transition to deposit amount entry
+        user_states[user_id]['current_bank'] = bank_name
+        user_states[user_id]['state'] = 'waiting_for_deposit_amount'
         
         update.message.reply_text(
-            f"✅ Custom bank '{bank_name}' has been added to your list."
-            f"\n\nYou can now use this bank in deposit entry and limit check features."
-            f"\n\nUse /settings to access banking features."
+            f"✅ Custom bank '{bank_name}' has been added.\n\n"
+            f"Please enter the deposit amount for {bank_name}:"
+        )
+        return
+
+    elif state == 'waiting_for_bank_name':
+        # User is entering a custom bank name for this transaction
+        bank_name = text.strip()
+        
+        # Check if bank already exists in default list
+        if bank_name in NEPAL_BANKS:
+            update.message.reply_text(
+                f"❗ '{bank_name}' already exists in the default bank list. Please enter a different name:"
+            )
+            return
+        
+        # Set the current bank and transition to deposit amount entry
+        user_states[user_id]['current_bank'] = bank_name
+        user_states[user_id]['state'] = 'waiting_for_deposit_amount'
+        
+        update.message.reply_text(
+            f"✅ Bank name '{bank_name}' has been set.\n\n"
+            f"Please enter the deposit amount for {bank_name}:"
         )
         return
     
@@ -1388,10 +1466,10 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
         # Store the path for future use
         user_csv_files[user_id] = csv_path
     else:
-        # Create a new CSV file with the requested format
-        # Make sure to use an absolute path for the new file
+        # Create a new CSV file with the requested format using current month
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        filename = os.path.join(current_dir, f"decimal_stripper_export_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        current_month = datetime.now().strftime('%B_%Y')  # e.g., "March_2024"
+        filename = os.path.join(current_dir, f"decimal_stripper_export_{current_month}.csv")
         file_exists = False
         # Store the path for future use
         user_csv_files[user_id] = filename
@@ -1470,8 +1548,6 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             if not file_exists:
                 fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Total Deposit', 'Total Paid', 'Remaining Balance']
                 writer.writerow(fieldnames)
-                # Add a separator row for better readability
-                writer.writerow(['---', '---', '---', '---', '---', '---', '---'])
             
             # If we have manually entered bank deposits, write each one with improved formatting
             if bank_deposits:
@@ -1513,29 +1589,59 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             
             # Write the charges (payments) in subsequent rows with running subtotals
             running_paid = 0.0
-            for i in range(len(charges)):
-                # Format the charge with two decimal places if it's a number
-                charge_formatted = ''
+            running_total = 0.0
+            
+            # Process amounts and charges together
+            max_rows = max(len(amounts), len(charges))
+            for i in range(max_rows):
+                amount_value = 0.0
                 charge_value = 0.0
-                try:
-                    # Remove any currency symbol and convert to float
-                    numeric_str = re.sub(r'[€$£¥]', '', charges[i])
-                    # Handle both decimal separators
-                    if decimal_separator == ',':
-                        numeric_str = numeric_str.replace(',', '.')
-                    charge_value = float(numeric_str)
-                    charge_formatted = f"{charge_value:.2f}"
-                    running_paid += charge_value
-                except ValueError:
-                    charge_formatted = charges[i]
                 
-                # For each charge, create a row with the payment in the Paid To Host column
-                # Every 5th payment or the last one, show a running subtotal
-                if (i + 1) % 5 == 0 or i == len(charges) - 1:
-                    charge_row = ['', '', '', charge_formatted, '', f"{running_paid:.2f}", '']
-                else:
-                    charge_row = ['', '', '', charge_formatted, '', '', '']
-                writer.writerow(charge_row)
+                # Get amount if available
+                if i < len(amounts):
+                    try:
+                        # Remove any currency symbol and convert to float
+                        numeric_str = re.sub(r'[€$£¥]', '', amounts[i])
+                        # Handle both decimal separators
+                        if decimal_separator == ',':
+                            numeric_str = numeric_str.replace(',', '.')
+                        amount_value = float(numeric_str)
+                    except ValueError:
+                        amount_value = 0.0
+                
+                # Get charge if available
+                if i < len(charges):
+                    try:
+                        # Remove any currency symbol and convert to float
+                        numeric_str = re.sub(r'[€$£¥]', '', charges[i])
+                        # Handle both decimal separators
+                        if decimal_separator == ',':
+                            numeric_str = numeric_str.replace(',', '.')
+                        charge_value = float(numeric_str)
+                    except ValueError:
+                        charge_value = 0.0
+                
+                # Calculate row total (amount + charge)
+                row_total = amount_value + charge_value
+                running_total += row_total
+                
+                # Format the values for display
+                amount_formatted = f"{amount_value:.2f}" if amount_value != 0 else ''
+                charge_formatted = f"{charge_value:.2f}" if charge_value != 0 else ''
+                row_total_formatted = f"{row_total:.2f}" if row_total != 0 else ''
+                
+                # Write the row with amount, charge, and their sum
+                if amount_value != 0 or charge_value != 0:
+                    row = ['', amount_formatted, '', charge_formatted, '', '', '']
+                    writer.writerow(row)
+                    
+                    # Write the sum in the next row
+                    if row_total != 0:
+                        sum_row = ['', '', '', f"Row Total: {row_total_formatted}", '', '', '']
+                        writer.writerow(sum_row)
+                
+                # Update running totals
+                running_paid += charge_value
             
             # Add empty row before totals
             writer.writerow(['', '', '', '', '', '', ''])
@@ -1545,9 +1651,6 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             total_deposit_formatted = f"{total_deposit:.2f}"
             total_paid_formatted = f"{total_paid:.2f}"
             balance_formatted = f"{balance:.2f}"
-            
-            # Add a separator row before totals for better readability
-            writer.writerow(['---', '---', '---', '---', '---', '---', '---'])
             
             # Write the totals row at the bottom with proper labels and formatting
             writer.writerow(['', '', '', '', '', '', ''])  # Empty row for spacing
@@ -1565,7 +1668,7 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             message.reply_document(
                 document=file,
                 filename=os.path.basename(filename),
-                caption=f"📊 Enhanced CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Remaining Balance.\n\nThe file includes:\n- Multiple bank deposits with their respective amounts ({len(bank_deposits)} banks included)\n- Individual payments in the Paid To Host column ({len(charges)} payments recorded)\n- Running totals with automatic calculations\n- Previous balance of {previous_balance:.2f} included in calculations\n- Final remaining balance: {balance:.2f}\n- Improved formatting for better readability"
+                caption=f"📊 Enhanced CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Remaining Balance.\n\nThe file includes:\n- Multiple bank deposits with their respective amounts ({len(bank_deposits)} banks included)\n- Individual payments in the Paid To Host column ({len(charges)} payments recorded)\n- Row totals showing sum of amount and charge for each entry\n- Running totals with automatic calculations\n- Previous balance of {previous_balance:.2f} included in calculations\n- Final remaining balance: {balance:.2f}\n- Improved formatting for better readability"
             )
 
         # Don't remove the file if it's a user-specified path
@@ -2271,371 +2374,64 @@ def start_add_custom_bank(update: Update, context) -> None:
         "🏦 Please enter the name of the custom bank you want to add:"
     )
 
-def handle_conversation(update: Update, context) -> None:
-    """Handle the conversation flow for collecting deposit information."""
-    # Safely extract user_id and text from the update object
-    if hasattr(update, 'effective_user') and update.effective_user is not None:
-        user_id = update.effective_user.id
-    elif hasattr(update, 'message') and hasattr(update.message, 'from_user') and update.message.from_user is not None:
-        user_id = update.message.from_user.id
-    else:
-        logger.error("Could not determine user_id in handle_conversation")
-        return
-    
-    # Safely extract text from the message
-    if hasattr(update, 'message') and hasattr(update.message, 'text'):
-        text = update.message.text
-    else:
-        logger.error("No text found in message")
-        return
-    
-    if user_id not in user_states:
-        # If no active conversation, process as a regular message
-        collect_message(update, context)
-        return
-    
-    state = user_states[user_id]['state']
-    
-    if state == 'waiting_for_custom_bank_name':
-        # User is adding a custom bank
-        bank_name = text.strip()
-        
-        # Initialize user's custom banks list if not already done
-        if user_id not in user_custom_banks:
-            user_custom_banks[user_id] = []
-        
-        # Check if bank already exists in default list or user's custom list
-        if bank_name in NEPAL_BANKS:
-            update.message.reply_text(
-                f"❗ '{bank_name}' already exists in the default bank list. Please enter a different name:"
-            )
-            return
-        elif bank_name in user_custom_banks[user_id]:
-            update.message.reply_text(
-                f"❗ '{bank_name}' already exists in your custom bank list. Please enter a different name:"
-            )
-            return
-        
-        # Add the custom bank
-        user_custom_banks[user_id].append(bank_name)
-        
-        # Clear the conversation state
-        del user_states[user_id]
-        
-        update.message.reply_text(
-            f"✅ Custom bank '{bank_name}' has been added to your list."
-            f"\n\nYou can now use this bank in deposit entry and limit check features."
-            f"\n\nUse /settings to access banking features."
-        )
-        return
-    
-    elif state == 'waiting_for_deposit_amount':
-        # Try to parse the deposit amount
-        try:
-            # Remove any currency symbols and convert to float
-            numeric_str = re.sub(r'[€$£¥]', '', text)
-            # Handle both decimal separators
-            if ',' in numeric_str and '.' not in numeric_str:
-                numeric_str = numeric_str.replace(',', '.')
-            
-            deposit_amount = float(numeric_str)
-            
-            # Get the current bank
-            current_bank = user_states[user_id]['current_bank']
-            
-            # Initialize bank_deposits list if it doesn't exist
-            if 'bank_deposits' not in user_states[user_id]:
-                user_states[user_id]['bank_deposits'] = []
-            
-            # Add to bank deposits list
-            user_states[user_id]['bank_deposits'].append({
-                'bank': current_bank,
-                'amount': deposit_amount
-            })
-            
-            # Update running total of deposits
-            user_states[user_id]['total_deposits'] += deposit_amount
-            
-            # Calculate current balance
-            current_balance = user_states[user_id]['total_deposits'] - user_states[user_id].get('total_paid', 0)
-            
-            # Ask if user wants to add another bank deposit
-            keyboard = [
-                [InlineKeyboardButton("Add Another Bank Deposit", callback_data='add_another_bank')],
-                [InlineKeyboardButton("Finish and Export CSV", callback_data='finish_csv_export')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            # Show summary of current deposits with improved formatting
-            deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
-            
-            update.message.reply_text(
-                f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
-                f"<b>Current deposits:</b>\n{deposits_summary}\n\n"
-                f"<b>Running total:</b> {user_states[user_id]['total_deposits']:.2f}\n"
-                f"<b>Current balance:</b> {current_balance:.2f}\n\n"
-                f"<b>Would you like to add another bank deposit or finish?</b>",
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
-        except ValueError:
-            update.message.reply_text(
-                "❗ Invalid amount. Please enter a valid number for the deposit amount:"
-            )
-    
-    elif state == 'waiting_for_remaining_balance':
-        # Try to parse the remaining balance
-        try:
-            # Remove any currency symbols and convert to float
-            numeric_str = re.sub(r'[€$£¥]', '', text)
-            # Handle both decimal separators
-            if ',' in numeric_str and '.' not in numeric_str:
-                numeric_str = numeric_str.replace(',', '.')
-            
-            remaining_balance = float(numeric_str)
-            user_states[user_id]['remaining_balance'] = remaining_balance
-            
-            # Add the remaining balance as a special entry if it's greater than 0
-            if remaining_balance > 0:
-                user_states[user_id]['bank_deposits'] = [{
-                    'bank': 'Previous Balance',
-                    'amount': remaining_balance
-                }]
-                user_states[user_id]['total_deposits'] = remaining_balance
-            
-            # Show bank selection for deposit entry
-            show_bank_selection_with_done(update, context)
-            
-        except ValueError:
-            update.message.reply_text(
-                "❗ Invalid number format. Please enter a valid number for the remaining balance:"
-            )
-    
-    elif state == 'waiting_for_csv_path':
-        if text == '1':
-            user_states[user_id]['state'] = 'waiting_for_csv_path_input'
-            update.message.reply_text(
-                "<b>Provide existing CSV file path</b>\n\n"
-                "📝 Please enter the full path to your CSV file (e.g., C:\\Users\\YourName\\Documents\\my_file.csv):",
-                parse_mode='HTML'
-            )
-        elif text == '2' or text.lower() in ['no', 'default', 'new']:
-            # Use default filename (no CSV path)
-            user_states[user_id]['csv_path'] = None
-            update.message.reply_text(
-                "<b>Creating new CSV file</b>\n\n"
-                "📊 Creating a new CSV file with your deposit information...",
-                parse_mode='HTML'
-            )
-            # Make sure we're using the message object, not the update directly
-            if hasattr(update, 'callback_query'):
-                # If this was triggered from a callback query
-                process_export_csv(update, context, use_manual_input=True)
-            else:
-                # If this was triggered from a text message
-                try:
-                    process_export_csv(update, context, use_manual_input=True)
-                except Exception as e:
-                    logger.error(f"Error processing CSV export: {e}")
-                    update.message.reply_text(f"❗ Error creating CSV file: {str(e)}")
-                    # Clear the conversation state on error
-                    if user_id in user_states:
-                        del user_states[user_id]
-        elif os.path.isfile(text) and text.lower().endswith('.csv'):
-            # User provided a valid CSV path directly
-            user_states[user_id]['csv_path'] = text
-            update.message.reply_text(
-                f"<b>Appending to existing CSV file</b>\n\n"
-                f"📊 Appending to your existing CSV file at:\n{text}",
-                parse_mode='HTML'
-            )
-            try:
-                process_export_csv(update, context, use_manual_input=True)
-            except Exception as e:
-                logger.error(f"Error processing CSV export: {e}")
-                update.message.reply_text(f"❗ Error creating CSV file: {str(e)}")
-                # Clear the conversation state on error
-                if user_id in user_states:
-                    del user_states[user_id]
-        else:
-            update.message.reply_text(
-                "❗ Invalid choice. Please reply with '1', '2', or a valid CSV file path:\n"
-                "1. Yes - I'll provide the file path\n"
-                "2. No - Create a new file (default)"
-            )
-    
-    elif state == 'waiting_for_csv_path_input':
-        if os.path.isfile(text) and text.lower().endswith('.csv'):
-            user_states[user_id]['csv_path'] = text
-            update.message.reply_text(
-                f"<b>Appending to existing CSV file</b>\n\n"
-                f"📊 Appending to your existing CSV file at:\n{text}",
-                parse_mode='HTML'
-            )
-            process_export_csv(update, context, use_manual_input=True)
-        else:
-            update.message.reply_text(
-                "❗ Invalid file path or file doesn't exist. Please enter a valid CSV file path:"
-            )
-    
-    elif state == 'waiting_for_limit_amount':
-        # Try to parse the limit amount
-        try:
-            # Remove any currency symbols and convert to float
-            numeric_str = re.sub(r'[€$£¥]', '', text)
-            # Handle both decimal separators
-            if ',' in numeric_str and '.' not in numeric_str:
-                numeric_str = numeric_str.replace(',', '.')
-            
-            limit_amount = float(numeric_str)
-            selected_bank = user_states[user_id].get('selected_bank')
-            
-            # Initialize bank limits for this user if not already done
-            if user_id not in user_bank_limits:
-                user_bank_limits[user_id] = {}
-            
-            # Set the limit for this bank
-            user_bank_limits[user_id][selected_bank] = limit_amount
-            
-            # Calculate remaining limit
-            total_deposit = user_bank_deposits.get(user_id, {}).get(selected_bank, 0)
-            remaining_limit = limit_amount - total_deposit
-            
-            update.message.reply_text(
-                f"✅ Limit of {limit_amount} set for {selected_bank}.\n\n"
-                f"📊 <b>Remaining Limit Calculation</b>:\n"
-                f"Bank Limit: {limit_amount}\n"
-                f"Total Deposits: {total_deposit}\n"
-                f"<b>Remaining Limit: {remaining_limit}</b>",
-                parse_mode='HTML'
-            )
-            
-            # Clear the conversation state
-            del user_states[user_id]
-        except ValueError:
-            update.message.reply_text(
-                "❗ Invalid amount. Please enter a valid number for the limit amount:"
-            )
-
-def create_socket_lock():
-    """Create a socket-based lock to ensure only one instance of the bot runs.
-    
-    Returns:
-        socket.socket or None: The lock socket if successful, None if another instance is running
-    """
-    # Use a unique name for the lock socket to prevent conflicts
-    lock_socket_name = "managermole_bot_instance_lock"
-    lock_port = 10001  # Use port 10001 to avoid conflicts with the web server
-    
-    # First try to clean up any existing instances
-    try:
-        cleanup_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        cleanup_socket.settimeout(1)
-        cleanup_socket.connect(('localhost', lock_port))
-        cleanup_socket.send(b'cleanup')
-        cleanup_socket.close()
-        time.sleep(2)  # Wait for cleanup
-    except:
-        pass  # Ignore errors during cleanup attempt
-    
-    # Create a new socket for locking
-    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    try:
-        # Set socket options to reuse the address and port
-        lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        # Add SO_EXCLUSIVEADDRUSE on Windows to ensure exclusive access
-        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
-            lock_socket.setsockopt(socket.SOL_SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        
-        # Set socket to non-blocking mode to prevent hanging
-        lock_socket.setblocking(False)
-        
-        # Try to bind to the lock port - this will fail if another instance is running
-        lock_socket.bind(('localhost', lock_port))
-        
-        # Set a reasonable timeout
-        lock_socket.settimeout(30)
-        
-        # Keep the socket alive by sending periodic heartbeats
-        def keep_socket_alive():
-            while True:
-                try:
-                    # Send a heartbeat to keep the socket active
-                    lock_socket.sendto(b'heartbeat', ('localhost', lock_port))
-                    time.sleep(10)  # Send heartbeat every 10 seconds
-                except:
-                    break
-        
-        # Start heartbeat thread to keep socket active
-        heartbeat_thread = threading.Thread(target=keep_socket_alive, daemon=True)
-        heartbeat_thread.start()
-        
-        logging.info(f"Successfully acquired socket lock on port {lock_port} - this is the only running instance")
-        return lock_socket
-    except socket.error as e:
-        logging.error(f"Failed to acquire socket lock on port {lock_port} - another instance is already running: {e}")
-        # Always ensure the socket is closed if binding fails
-        try:
-            lock_socket.close()
-        except Exception as close_error:
-            logging.error(f"Error closing socket: {close_error}")
-        return None
-
 def main():
-    """Start the bot with enhanced instance management and conflict prevention."""
-    # Set up process-wide lock to ensure only one instance runs
+    """Start the bot with enhanced instance management."""
     global bot_updater, bot_lock_socket
+    
+    # First, try to kill any existing instances
+    try:
+        kill_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        kill_socket.settimeout(1)
+        kill_socket.connect(('localhost', 10001))
+        kill_socket.send(b'kill')
+        kill_socket.close()
+        time.sleep(5)
+    except:
+        pass
+    
+    # Get socket lock
     lock_socket = create_socket_lock()
     bot_lock_socket = lock_socket
     if not lock_socket:
-        logging.error("Exiting because another instance is already running (socket lock)")
+        logging.error("Failed to acquire socket lock - exiting")
         return
     
-    # Double-check with thread lock for extra safety
+    # Get thread lock
     if not BOT_INSTANCE_LOCK.acquire(blocking=False):
-        logging.error("Another instance is already running (thread lock)")
-        # Close the socket lock since we couldn't acquire the thread lock
+        logging.error("Failed to acquire thread lock - exiting")
         if lock_socket:
             lock_socket.close()
         return
     
-    # Add a delay to ensure any previous instance has fully released resources
-    logging.info("Acquired all locks successfully, waiting for resources to be fully available...")
-    time.sleep(15)  # Increased delay for better resource cleanup
+    # Wait for resources to be available
+    time.sleep(20)  # Increased wait time
     
-    # Variable to track the updater for proper cleanup
     updater = None
     
     try:
-        # Verify bot token is available
         if not BOT_TOKEN:
-            logging.error("Bot token not found. Please set the BOT_TOKEN environment variable.")
+            logging.error("Bot token not found")
             return
         
-        # First, try to clean up any existing connections to Telegram API
+        # Aggressive cleanup of existing connections
         try:
-            # Create a temporary bot instance to clean up any existing webhooks
-            from telegram import Bot
             cleanup_bot = Bot(BOT_TOKEN)
             cleanup_bot.delete_webhook(drop_pending_updates=True)
-            logging.info("Pre-startup cleanup: Deleted any existing webhooks")
-            # Wait for Telegram servers to process the webhook deletion
-            time.sleep(10)  # Increased wait time
-            del cleanup_bot  # Remove the temporary bot instance
-        except Exception as pre_cleanup_error:
-            logging.warning(f"Pre-startup cleanup failed: {pre_cleanup_error}")
-            # Continue anyway - this is just a precaution
-            
-        # Create the Updater with a longer timeout
-        updater = Updater(BOT_TOKEN, request_kwargs={'read_timeout': 60, 'connect_timeout': 90})
-        bot_updater = updater  # Set global variable for signal handler
-
-        # Get the dispatcher to register handlers
+            time.sleep(15)  # Longer wait time
+            del cleanup_bot
+        except:
+            pass
+        
+        # Create updater with longer timeouts
+        updater = Updater(BOT_TOKEN, request_kwargs={
+            'read_timeout': 90,
+            'connect_timeout': 120,
+            'write_timeout': 90
+        })
+        bot_updater = updater
+        
+        # Register handlers
         dp = updater.dispatcher
-
-        # Add command handlers
         dp.add_handler(CommandHandler("start", start))
         dp.add_handler(CommandHandler("help", help_command))
         dp.add_handler(CommandHandler("process", process_command))
@@ -2644,120 +2440,107 @@ def main():
         dp.add_handler(CommandHandler("export_csv", export_csv))
         dp.add_handler(CommandHandler("export_json", export_json))
         dp.add_handler(CommandHandler("stats", stats_command))
-
-        # Add callback query handler
         dp.add_handler(CallbackQueryHandler(button_callback))
-        
-        # Add message handler - handle conversation first, then regular message collection
         dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_conversation))
-
-        # Add enhanced error handler for Conflict errors
         dp.add_error_handler(error_handler)
-
-        # Start the keep-alive server to prevent the bot from being terminated
-        keep_alive_success = keep_alive()
-        if not keep_alive_success:
-            logging.warning("Keep alive server failed to start, but continuing with bot operation")
-
-        # Start the Bot with improved conflict prevention
-        max_retries = 12  # Increased number of retries
+        
+        # Start keep-alive
+        keep_alive()
+        
+        # Start bot with improved conflict handling
+        max_retries = 15  # More retries
         retry_count = 0
-        backoff_time = 15  # Increased initial backoff time
+        backoff_time = 20  # Longer initial backoff
         
         while retry_count < max_retries:
             try:
-                # Thorough cleanup before starting
                 logging.info(f"Attempt {retry_count + 1}/{max_retries} to start bot")
                 
-                # First ensure any webhook is deleted
+                # Aggressive cleanup before each attempt
                 updater.bot.delete_webhook(drop_pending_updates=True)
-                logging.info("Webhook deleted and pending updates dropped")
+                time.sleep(15)
                 
-                # Wait for Telegram servers to process the webhook deletion
-                time.sleep(10)  # Increased wait time
-                
-                # Reset the update fetcher state if it exists
-                if hasattr(dp, '_update_fetcher') and hasattr(dp._update_fetcher, '_last_update_id'):
+                if hasattr(dp, '_update_fetcher'):
                     dp._update_fetcher._last_update_id = 0
-                    logging.info("Reset update fetcher state before starting")
                 
                 # Start polling with improved settings
                 updater.start_polling(
-                    timeout=90,  # Increased timeout
-                    drop_pending_updates=True,  # Ignore old messages
-                    allowed_updates=['message', 'callback_query', 'chat_member']  # Specify updates we care about
+                    timeout=120,  # Longer timeout
+                    drop_pending_updates=True,
+                    allowed_updates=['message', 'callback_query', 'chat_member'],
+                    bootstrap_retries=5,  # More bootstrap retries
+                    read_timeout=90,
+                    write_timeout=90,
+                    connect_timeout=120
                 )
+                
                 logging.info("Bot started successfully")
-                break  # Exit the retry loop if successful
+                break
+                
             except Conflict as ce:
                 retry_count += 1
                 logging.error(f"Conflict error on attempt {retry_count}/{max_retries}: {ce}")
                 
-                # Try more aggressive cleanup
+                # Aggressive cleanup
                 try:
                     if hasattr(updater, 'bot'):
                         updater.bot.delete_webhook(drop_pending_updates=True)
-                        logging.info("Forced webhook deletion during conflict recovery")
                     
-                    # Try to completely reset the updater
                     if hasattr(updater, 'stop'):
-                        try:
-                            updater.stop()
-                            logging.info("Stopped updater during conflict recovery")
-                        except Exception as stop_error:
-                            logging.error(f"Error stopping updater: {stop_error}")
+                        updater.stop()
                     
-                    # Reset dispatcher state if possible
                     if hasattr(dp, '_update_fetcher'):
-                        if hasattr(dp._update_fetcher, 'running') and dp._update_fetcher.running:
+                        if hasattr(dp._update_fetcher, 'running'):
                             dp._update_fetcher.running = False
-                            logging.info("Stopped update fetcher during conflict recovery")
-                        if hasattr(dp._update_fetcher, '_last_update_id'):
-                            dp._update_fetcher._last_update_id = 0
-                            logging.info("Reset update ID during conflict recovery")
+                        dp._update_fetcher._last_update_id = 0
+                        
+                    # Force cleanup of any remaining sockets
+                    for sock in [s for s in socket.socket() if s.fileno() > 0]:
+                        try:
+                            sock.close()
+                        except:
+                            pass
+                            
                 except Exception as cleanup_error:
                     logging.error(f"Error during conflict cleanup: {cleanup_error}")
                 
                 if retry_count >= max_retries:
-                    logging.error("Maximum retry attempts reached. Exiting.")
+                    logging.error("Maximum retry attempts reached")
                     return
-                    
-                # Exponential backoff between retries with some randomization
-                backoff_time = backoff_time * 1.5 + random.uniform(0, 5)
-                logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt...")
+                
+                # Longer backoff with more randomization
+                backoff_time = backoff_time * 2 + random.uniform(0, 10)
+                logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt")
                 time.sleep(backoff_time)
+                
             except Exception as e:
                 logging.error(f"Failed to start bot: {e}")
-                # Log the full traceback for better debugging
                 import traceback
                 logging.error(traceback.format_exc())
                 
-                # If we can't start polling, wait and try again
                 retry_count += 1
-                backoff_time *= 1.5
-                logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt...")
+                backoff_time *= 2
+                logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt")
                 time.sleep(backoff_time)
+                
                 if retry_count >= max_retries:
-                    logging.error("Maximum retry attempts reached. Exiting.")
+                    logging.error("Maximum retry attempts reached")
                     return
-
-        # Run the bot until you press Ctrl-C or it's terminated
-        logging.info("Bot is now running. Press Ctrl+C to stop.")
+        
+        # Run the bot
+        logging.info("Bot is now running")
         updater.idle()
+        
     except KeyboardInterrupt:
-        logging.info("Bot stopping due to keyboard interrupt...")
+        logging.info("Bot stopping due to keyboard interrupt")
     except Exception as e:
-        logging.error(f"Unexpected error in main bot loop: {e}")
+        logging.error(f"Unexpected error: {e}")
         import traceback
         logging.error(traceback.format_exc())
     finally:
-        # Proper cleanup when the bot is shutting down
-        logging.info("Performing cleanup before exit...")
-        
-        # Use the graceful shutdown function to clean up resources
+        logging.info("Performing cleanup")
         graceful_shutdown(updater, lock_socket)
-        
-        logging.info("Cleanup complete, bot is shutting down")
+        logging.info("Cleanup complete")
 
 
 # Global variables to track bot state
