@@ -201,33 +201,53 @@ def keep_alive():
     """
     Creates and starts a Flask server in a new thread to keep the bot alive.
     Provides a web interface to monitor the bot's status.
+    
+    Returns:
+        bool: True if the server started successfully, False otherwise
     """
+    # Check if a Flask server is already running on the port
+    port = int(os.getenv('PORT', 10000))
+    
+    # Try to detect if another server is already running on this port
+    try:
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_socket.settimeout(1)
+        result = test_socket.connect_ex(('localhost', port))
+        test_socket.close()
+        
+        if result == 0:
+            logging.warning(f"Port {port} is already in use. Another server may be running.")
+            # We'll still try to start our server as it might be our own previous instance
+    except Exception as e:
+        logging.warning(f"Error checking port availability: {e}")
+    
     try:
         # Start the Flask server in a separate thread with a unique name
         # This helps identify and manage the thread
-        t = Thread(target=run, name="FlaskServerThread")
-        t.daemon = True
-        t.start()
+        server_thread = Thread(target=run, name="FlaskServerThread")
+        server_thread.daemon = True  # Make sure thread doesn't block program exit
+        server_thread.start()
         
-        # Wait a moment to ensure the Flask server is fully initialized
+        # Wait for the Flask server to initialize
         # This helps prevent race conditions with the bot polling
-        time.sleep(3)  # Increased from 2 to 3 seconds
+        initialization_time = 4  # Increased wait time for better stability
+        logging.info(f"Waiting {initialization_time} seconds for Flask server to initialize...")
+        time.sleep(initialization_time)
         
         # Check if the Flask thread is still alive after initialization
-        if not t.is_alive():
+        if not server_thread.is_alive():
             logging.error("Flask server thread died during initialization")
             return False
             
         logging.info("Keep alive server started successfully")
         
-        # Start the self-ping thread with a unique name
+        # Start the self-ping thread with a unique name to keep the service active
         ping_thread = Thread(target=self_ping, name="SelfPingThread")
         ping_thread.daemon = True
         ping_thread.start()
         logging.info("Self-ping service started")
         
-        # Log the URLs
-        port = int(os.getenv('PORT', 10000))  # Changed default from 8080 to 10000
+        # Log the URLs for monitoring
         render_url = os.getenv('RENDER_EXTERNAL_URL', f"http://0.0.0.0:{port}")
         logging.info(f"Dashboard available at: {render_url}")
         logging.info(f"Health endpoint: {render_url}/health")
@@ -237,7 +257,7 @@ def keep_alive():
         # Log the full traceback for better debugging
         import traceback
         logging.error(traceback.format_exc())
-        # Don't raise the exception, just log it
+        # Don't raise the exception, just log it and continue
         # This prevents the keep_alive failure from stopping the bot
         logging.warning("Continuing without keep alive server")
         return False
