@@ -960,15 +960,19 @@ def handle_conversation(update: Update, context) -> None:
             for d in user_states[user_id]['bank_deposits']:
                 bank_name = d['bank']
                 amount = d['amount']
-                deposits_list.append(f"{bank_name}: {amount:.2f}")
+                deposits_list.append(bank_name + ": " + f"{amount:.2f}")
             deposits_summary = ", ".join(deposits_list)
             
-            update.message.reply_text(
+            message = (
                 f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
                 f"<b>Current deposits:</b>\n{deposits_summary}\n\n"
                 f"<b>Running total:</b> {user_states[user_id]['total_deposits']:.2f}\n"
                 f"<b>Current balance:</b> {current_balance:.2f}\n\n"
-                f"<b>Would you like to add another bank deposit or finish?</b>",
+                f"<b>Would you like to add another bank deposit or finish?</b>"
+            )
+            
+            update.message.reply_text(
+                message,
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
