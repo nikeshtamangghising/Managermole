@@ -199,68 +199,33 @@ def self_ping():
             time.sleep(30)  # Wait 30 seconds before retrying
 
 def keep_alive():
-    """
-    Creates and starts a Flask server in a new thread to keep the bot alive.
-    Provides a web interface to monitor the bot's status.
+    """Start a Flask server to keep the bot alive.
     
     Returns:
         bool: True if the server started successfully, False otherwise
     """
-    # Check if a Flask server is already running on the port
-    port = int(os.getenv('PORT', 10000))
-    
-    # Try to detect if another server is already running on this port
     try:
-        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        test_socket.settimeout(1)
-        result = test_socket.connect_ex(('localhost', port))
-        test_socket.close()
+        # Check if the port is already in use
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)  # 2 second timeout
+        result = sock.connect_ex(('localhost', 10000))
+        sock.close()
         
-        if result == 0:
-            logging.warning(f"Port {port} is already in use. Another server may be running.")
-            # We'll still try to start our server as it might be our own previous instance
-    except Exception as e:
-        logging.warning(f"Error checking port availability: {e}")
-    
-    try:
-        # Start the Flask server in a separate thread with a unique name
-        # This helps identify and manage the thread
-        server_thread = Thread(target=run, name="FlaskServerThread")
-        server_thread.daemon = True  # Make sure thread doesn't block program exit
+        if result == 0:  # Port is already in use
+            logging.warning("Port 10000 is already in use - another instance may be running")
+            logging.info("Using existing keep-alive server")
+            return True
+            
+        # Start the Flask server in a separate thread
+        server_thread = Thread(target=run)
+        server_thread.daemon = True  # Thread will close when the main program exits
         server_thread.start()
         
-        # Wait for the Flask server to initialize
-        # This helps prevent race conditions with the bot polling
-        initialization_time = 4  # Increased wait time for better stability
-        logging.info(f"Waiting {initialization_time} seconds for Flask server to initialize...")
-        time.sleep(initialization_time)
-        
-        # Check if the Flask thread is still alive after initialization
-        if not server_thread.is_alive():
-            logging.error("Flask server thread died during initialization")
-            return False
-            
-        logging.info("Keep alive server started successfully")
-        
-        # Start the self-ping thread with a unique name to keep the service active
-        ping_thread = Thread(target=self_ping, name="SelfPingThread")
-        ping_thread.daemon = True
-        ping_thread.start()
-        logging.info("Self-ping service started")
-        
-        # Log the URLs for monitoring
-        render_url = os.getenv('RENDER_EXTERNAL_URL', f"http://0.0.0.0:{port}")
-        logging.info(f"Dashboard available at: {render_url}")
-        logging.info(f"Health endpoint: {render_url}/health")
-        logging.info(f"Server can be monitored at: http://0.0.0.0:{port} or your deployment URL")
+        # Wait a moment to ensure the server starts properly
+        time.sleep(1)
+        logging.info("Keep-alive server started successfully")
+        return True
     except Exception as e:
-        logging.error(f"Failed to start keep alive server: {e}")
-        # Log the full traceback for better debugging
-        import traceback
-        logging.error(traceback.format_exc())
-        # Don't raise the exception, just log it and continue
-        # This prevents the keep_alive failure from stopping the bot
-        logging.warning("Continuing without keep alive server")
+        logging.error(f"Failed to start keep-alive server: {e}")
+        # Continue anyway - the bot can run without the keep-alive server
         return False
-    
-    return True

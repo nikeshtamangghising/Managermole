@@ -7,6 +7,7 @@ import csv
 import json
 import socket
 import threading
+import random
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
@@ -119,6 +120,63 @@ user_custom_banks = {}
 # Create a lock to ensure only one instance of the bot is running
 BOT_INSTANCE_LOCK = threading.Lock()
 
+# Flag to track if shutdown is in progress
+SHUTDOWN_IN_PROGRESS = False
+
+# Function to handle graceful shutdown
+def graceful_shutdown(updater=None, lock_socket=None):
+    """Perform a graceful shutdown of the bot.
+    
+    Args:
+        updater: The bot updater instance
+        lock_socket: The socket lock
+    """
+    global SHUTDOWN_IN_PROGRESS
+    
+    # Set shutdown flag to prevent multiple shutdown attempts
+    if SHUTDOWN_IN_PROGRESS:
+        logging.info("Shutdown already in progress, skipping duplicate shutdown")
+        return
+        
+    SHUTDOWN_IN_PROGRESS = True
+    logging.info("Starting graceful shutdown sequence...")
+    
+    # Stop the updater if it was created and started
+    if updater is not None:
+        try:
+            logging.info("Stopping updater...")
+            # First try to delete webhook to ensure clean shutdown
+            if hasattr(updater, 'bot') and hasattr(updater.bot, 'delete_webhook'):
+                try:
+                    updater.bot.delete_webhook(drop_pending_updates=True)
+                    logging.info("Deleted webhook during shutdown")
+                except Exception as webhook_error:
+                    logging.error(f"Error deleting webhook during shutdown: {webhook_error}")
+            
+            # Now stop the updater
+            updater.stop()
+            logging.info("Updater stopped successfully")
+        except Exception as e:
+            logging.error(f"Error stopping updater: {e}")
+    
+    # Release the thread lock
+    if BOT_INSTANCE_LOCK.locked():
+        logging.info("Releasing thread lock...")
+        BOT_INSTANCE_LOCK.release()
+        logging.info("Thread lock released")
+    
+    # Close the socket lock
+    if lock_socket:
+        try:
+            logging.info("Closing socket lock...")
+            lock_socket.close()
+            logging.info("Socket lock closed")
+        except Exception as e:
+            logging.error(f"Error closing socket lock: {e}")
+    
+    logging.info("Graceful shutdown complete")
+    SHUTDOWN_IN_PROGRESS = False
+
 # Function to handle errors
 def error_handler(update, context):
     """Handle errors in the dispatcher with improved conflict resolution."""
@@ -127,10 +185,18 @@ def error_handler(update, context):
             logging.warning("Conflict error: Another instance of the bot is already running")
             # Implement a more sophisticated recovery strategy
             # First, log detailed information about the conflict
+            logging.info(f"Detailed conflict error: {context.error}")
             logging.info("Attempting to resolve conflict situation...")
             
+            # Check if we should terminate this instance
+            global BOT_INSTANCE_LOCK
+            if not BOT_INSTANCE_LOCK.locked():
+                logging.warning("Thread lock not held by this instance - this instance should terminate")
+                # Force exit this instance
+                return
+                
             # Wait longer to ensure the other instance has a chance to stabilize
-            recovery_wait = 20  # Increased wait time for better recovery chances
+            recovery_wait = 30  # Increased wait time for better recovery chances
             logging.info(f"Waiting {recovery_wait} seconds before attempting recovery")
             time.sleep(recovery_wait)
             
@@ -152,9 +218,20 @@ def error_handler(update, context):
                         if hasattr(context.dispatcher._update_fetcher, 'running') and context.dispatcher._update_fetcher.running:
                             logging.info("Attempting to stop the update fetcher")
                             context.dispatcher._update_fetcher.running = False
+                            
+                            # Force a complete restart of the update fetcher
+                            if hasattr(context.dispatcher, 'start_polling'):
+                                try:
+                                    # Stop and restart polling with clean state
+                                    context.dispatcher.stop()
+                                    time.sleep(5)  # Wait for complete stop
+                                    context.dispatcher.start_polling(drop_pending_updates=True)
+                                    logging.info("Restarted polling with clean state")
+                                except Exception as restart_error:
+                                    logging.error(f"Failed to restart polling: {restart_error}")
                     
                     # Add a delay to ensure changes take effect
-                    time.sleep(3)
+                    time.sleep(5)
                     logging.info("Completed enhanced conflict recovery process")
                 else:
                     logging.warning("Could not access bot or get_updates method for recovery")
@@ -165,18 +242,43 @@ def error_handler(update, context):
                 logging.error(traceback.format_exc())
                 # Signal that this instance should terminate
                 logging.critical("Recovery failed - this instance should terminate")
+                
+                # Try to release resources before terminating
+                try:
+                    if hasattr(context, 'dispatcher') and hasattr(context.dispatcher, 'stop'):
+                        context.dispatcher.stop()
+                        logging.info("Stopped dispatcher during failed recovery")
+                except Exception as cleanup_error:
+                    logging.error(f"Error during cleanup: {cleanup_error}")
         elif isinstance(context.error, NetworkError):
             logging.error(f"Network error: {context.error}. Waiting before retry.")
-            time.sleep(25)  # Increased wait time for network errors
+            # Implement exponential backoff for network errors
+            backoff_time = 25 + (5 * random.random())  # Base time plus some randomization
+            logging.info(f"Backing off for {backoff_time:.1f} seconds")
+            time.sleep(backoff_time)  # Increased wait time for network errors
         else:
             # Get update information safely
             update_str = str(update) if update else "None"
             logging.error(f"Update {update_str} caused error: {context.error}")
+            
+            # For other errors, log more details for debugging
+            import traceback
+            logging.error(f"Error traceback: {traceback.format_exc()}")
     except Exception as e:
         logging.error(f"Error in error handler: {e}")
         # Log the full traceback for better debugging
         import traceback
         logging.error(traceback.format_exc())
+        
+        # Try to recover from error in error handler
+        try:
+            if hasattr(context, 'dispatcher') and hasattr(context.dispatcher, 'update_queue'):
+                # Clear the update queue to prevent processing problematic updates
+                while not context.dispatcher.update_queue.empty():
+                    context.dispatcher.update_queue.get(False)
+                logging.info("Cleared update queue after error in error handler")
+        except Exception as recovery_error:
+            logging.error(f"Failed to recover from error in error handler: {recovery_error}")
 
 def start(update: Update, context) -> None:
     """Send a message when the command /start is issued."""
@@ -2559,6 +2661,10 @@ def create_socket_lock():
         # Set socket options to reuse the address and port
         lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
+        # Add SO_EXCLUSIVEADDRUSE on Windows to ensure exclusive access
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        
         # Set socket to non-blocking mode to prevent hanging
         lock_socket.setblocking(False)
         
@@ -2567,6 +2673,20 @@ def create_socket_lock():
         
         # Set a reasonable timeout
         lock_socket.settimeout(30)
+        
+        # Keep the socket alive by sending periodic heartbeats
+        def keep_socket_alive():
+            while True:
+                try:
+                    # Send a heartbeat to keep the socket active
+                    lock_socket.sendto(b'heartbeat', ('localhost', lock_port))
+                    time.sleep(10)  # Send heartbeat every 10 seconds
+                except:
+                    break
+        
+        # Start heartbeat thread to keep socket active
+        heartbeat_thread = threading.Thread(target=keep_socket_alive, daemon=True)
+        heartbeat_thread.start()
         
         logging.info(f"Successfully acquired socket lock on port {lock_port} - this is the only running instance")
         return lock_socket
@@ -2582,7 +2702,9 @@ def create_socket_lock():
 def main():
     """Start the bot with enhanced instance management and conflict prevention."""
     # Set up process-wide lock to ensure only one instance runs
+    global bot_updater, bot_lock_socket
     lock_socket = create_socket_lock()
+    bot_lock_socket = lock_socket
     if not lock_socket:
         logging.error("Exiting because another instance is already running (socket lock)")
         return
@@ -2597,7 +2719,7 @@ def main():
     
     # Add a delay to ensure any previous instance has fully released resources
     logging.info("Acquired all locks successfully, waiting for resources to be fully available...")
-    time.sleep(7)  # Increased delay for better resource cleanup
+    time.sleep(10)  # Increased delay for better resource cleanup
     
     # Variable to track the updater for proper cleanup
     updater = None
@@ -2607,9 +2729,24 @@ def main():
         if not BOT_TOKEN:
             logging.error("Bot token not found. Please set the BOT_TOKEN environment variable.")
             return
+        
+        # First, try to clean up any existing connections to Telegram API
+        try:
+            # Create a temporary bot instance to clean up any existing webhooks
+            from telegram import Bot
+            cleanup_bot = Bot(BOT_TOKEN)
+            cleanup_bot.delete_webhook(drop_pending_updates=True)
+            logging.info("Pre-startup cleanup: Deleted any existing webhooks")
+            # Wait for Telegram servers to process the webhook deletion
+            time.sleep(5)
+            del cleanup_bot  # Remove the temporary bot instance
+        except Exception as pre_cleanup_error:
+            logging.warning(f"Pre-startup cleanup failed: {pre_cleanup_error}")
+            # Continue anyway - this is just a precaution
             
         # Create the Updater with a longer timeout
-        updater = Updater(BOT_TOKEN, request_kwargs={'read_timeout': 30, 'connect_timeout': 40})
+        updater = Updater(BOT_TOKEN, request_kwargs={'read_timeout': 40, 'connect_timeout': 60})
+        bot_updater = updater  # Set global variable for signal handler
 
         # Get the dispatcher to register handlers
         dp = updater.dispatcher
@@ -2639,9 +2776,9 @@ def main():
             logging.warning("Keep alive server failed to start, but continuing with bot operation")
 
         # Start the Bot with improved conflict prevention
-        max_retries = 6  # Increased number of retries
+        max_retries = 8  # Increased number of retries
         retry_count = 0
-        backoff_time = 6  # Initial backoff time in seconds
+        backoff_time = 8  # Initial backoff time in seconds
         
         while retry_count < max_retries:
             try:
@@ -2653,13 +2790,19 @@ def main():
                 logging.info("Webhook deleted and pending updates dropped")
                 
                 # Wait for Telegram servers to process the webhook deletion
-                time.sleep(3)  # Increased wait time
+                time.sleep(5)  # Increased wait time
+                
+                # Reset the update fetcher state if it exists
+                if hasattr(dp, '_update_fetcher') and hasattr(dp._update_fetcher, '_last_update_id'):
+                    dp._update_fetcher._last_update_id = 0
+                    logging.info("Reset update fetcher state before starting")
                 
                 # Start polling with improved settings
                 updater.start_polling(
-                    timeout=40,  # Increased timeout
+                    timeout=60,  # Increased timeout
                     drop_pending_updates=True,  # Ignore old messages
-                    allowed_updates=['message', 'callback_query', 'chat_member']  # Specify updates we care about
+                    allowed_updates=['message', 'callback_query', 'chat_member'],  # Specify updates we care about
+                    clean=True  # Ensure clean start
                 )
                 logging.info("Bot started successfully")
                 break  # Exit the retry loop if successful
@@ -2672,6 +2815,23 @@ def main():
                     if hasattr(updater, 'bot'):
                         updater.bot.delete_webhook(drop_pending_updates=True)
                         logging.info("Forced webhook deletion during conflict recovery")
+                    
+                    # Try to completely reset the updater
+                    if hasattr(updater, 'stop'):
+                        try:
+                            updater.stop()
+                            logging.info("Stopped updater during conflict recovery")
+                        except Exception as stop_error:
+                            logging.error(f"Error stopping updater: {stop_error}")
+                    
+                    # Reset dispatcher state if possible
+                    if hasattr(dp, '_update_fetcher'):
+                        if hasattr(dp._update_fetcher, 'running') and dp._update_fetcher.running:
+                            dp._update_fetcher.running = False
+                            logging.info("Stopped update fetcher during conflict recovery")
+                        if hasattr(dp._update_fetcher, '_last_update_id'):
+                            dp._update_fetcher._last_update_id = 0
+                            logging.info("Reset update ID during conflict recovery")
                 except Exception as cleanup_error:
                     logging.error(f"Error during conflict cleanup: {cleanup_error}")
                 
@@ -2680,8 +2840,7 @@ def main():
                     return
                     
                 # Exponential backoff between retries with some randomization
-                import random
-                backoff_time = backoff_time * 1.5 + random.uniform(0, 2)
+                backoff_time = backoff_time * 1.5 + random.uniform(0, 3)
                 logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt...")
                 time.sleep(backoff_time)
             except Exception as e:
@@ -2712,32 +2871,50 @@ def main():
         # Proper cleanup when the bot is shutting down
         logging.info("Performing cleanup before exit...")
         
-        # Stop the updater if it was created and started
-        if updater is not None:
-            try:
-                logging.info("Stopping updater...")
-                updater.stop()
-                logging.info("Updater stopped successfully")
-            except Exception as e:
-                logging.error(f"Error stopping updater: {e}")
-        
-        # Release the thread lock
-        if BOT_INSTANCE_LOCK.locked():
-            logging.info("Releasing thread lock...")
-            BOT_INSTANCE_LOCK.release()
-            logging.info("Thread lock released")
-        
-        # Close the socket lock
-        if lock_socket:
-            try:
-                logging.info("Closing socket lock...")
-                lock_socket.close()
-                logging.info("Socket lock closed")
-            except Exception as e:
-                logging.error(f"Error closing socket lock: {e}")
+        # Use the graceful shutdown function to clean up resources
+        graceful_shutdown(updater, lock_socket)
         
         logging.info("Cleanup complete, bot is shutting down")
 
 
-if __name__ == '__main__':
-    main()
+# Global variables to track bot state
+bot_updater = None
+bot_lock_socket = None
+
+# Signal handler for graceful shutdown
+def signal_handler(sig, frame):
+    """Handle termination signals to ensure graceful shutdown."""
+    logging.info(f"Received signal {sig}, initiating graceful shutdown...")
+    global bot_updater, bot_lock_socket
+    graceful_shutdown(bot_updater, bot_lock_socket)
+    import sys
+    sys.exit(0)
+
+if __name__ == "__main__":
+    try:
+        # Register signal handlers for graceful shutdown
+        import signal
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Check if another instance is already running before starting
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Try to bind to the lock port - this will fail if another instance is running
+            test_socket.bind(('localhost', 10001))
+            test_socket.close()
+            # If we get here, no other instance is running, so we can start
+            logging.info("No other instances detected, starting bot...")
+            main()
+        except socket.error:
+            # Another instance is already running
+            logging.error("Another instance of the bot is already running. Exiting.")
+            test_socket.close()
+            import sys
+            sys.exit(1)
+    except Exception as e:
+        logging.critical(f"Critical error during startup check: {e}")
+        import traceback
+        logging.critical(traceback.format_exc())
+        import sys
+        sys.exit(1)
