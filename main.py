@@ -956,7 +956,12 @@ def handle_conversation(update: Update, context) -> None:
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             # Show summary of current deposits with improved formatting
-            deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
+            deposits_list = []
+            for d in user_states[user_id]['bank_deposits']:
+                bank_name = d['bank']
+                amount = d['amount']
+                deposits_list.append(f"{bank_name}: {amount:.2f}")
+            deposits_summary = ", ".join(deposits_list)
             
             update.message.reply_text(
                 f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
