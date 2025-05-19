@@ -541,11 +541,101 @@ def show_bank_selection(update: Update, context) -> None:
     
     # Add a separator
     keyboard.append([InlineKeyboardButton("───────── NEPAL BANKS ─────────", callback_data="header_no_action")])
+
+def show_bank_selection_with_done(update: Update, context) -> None:
+    """Show bank selection keyboard with a Done button to exit the process."""
+    # Get user ID
+    if hasattr(update, 'callback_query') and update.callback_query is not None:
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
+    
+    # Create a keyboard with Nepali banks and user's custom banks
+    keyboard = []
+    
+    # Add a header row for better organization
+    keyboard.append([InlineKeyboardButton("🏦 SELECT A BANK OR CLICK DONE 🏦", callback_data="header_no_action")])
+    
+    # Add a Done button at the top for easy access
+    keyboard.append([InlineKeyboardButton("✅ DONE - FINISH BANK ENTRY", callback_data="done_bank_selection")])
+    
+    # Add user's previous selections first if they exist
+    previous_banks = []
+    if user_id in user_states and 'bank_deposits' in user_states[user_id]:
+        for deposit in user_states[user_id]['bank_deposits']:
+            if deposit['bank'] != 'Previous Balance' and deposit['bank'] not in previous_banks:
+                previous_banks.append(deposit['bank'])
+    
+    if previous_banks:
+        keyboard.append([InlineKeyboardButton("✅ RECENTLY USED BANKS", callback_data="header_no_action")])
+        for i, bank in enumerate(previous_banks):
+            bank_index = NEPAL_BANKS.index(bank) if bank in NEPAL_BANKS else -1
+            if bank_index >= 0:
+                callback_data = f"select_bank_{bank_index}"
+            else:
+                # Must be a custom bank
+                custom_index = user_custom_banks.get(user_id, []).index(bank) if bank in user_custom_banks.get(user_id, []) else -1
+                callback_data = f"select_custom_bank_{custom_index}" if custom_index >= 0 else "enter_different_bank"
+            
+            keyboard.append([InlineKeyboardButton(f"🔄 {bank}", callback_data=callback_data)])
+    
+    # Add a separator
+    keyboard.append([InlineKeyboardButton("───────── NEPAL BANKS ─────────", callback_data="header_no_action")])
     
     # Add default Nepali banks in a more organized way (3 per row)
     row = []
+    for i, bank in enumerate(NEPAL_BANKS):
+        if i % 3 == 0 and i > 0:
+            keyboard.append(row)
+            row = []
+        row.append(InlineKeyboardButton(bank, callback_data=f"select_bank_{i}"))
     
-    # Add default Nepali banks in a more organized way (3 per row)
+    if row:  # Add any remaining buttons
+        keyboard.append(row)
+    
+    # Add user's custom banks if any
+    if user_id in user_custom_banks and user_custom_banks[user_id]:
+        # Add a separator row
+        keyboard.append([InlineKeyboardButton("───────── YOUR CUSTOM BANKS ─────────", callback_data="custom_bank_header")])
+        
+        # Add custom banks (3 per row)
+        row = []
+        for i, bank in enumerate(user_custom_banks[user_id]):
+            if i % 3 == 0 and i > 0:
+                keyboard.append(row)
+                row = []
+            # Use a different prefix for custom banks to distinguish them
+            row.append(InlineKeyboardButton(f"🔶 {bank}", callback_data=f"select_custom_bank_{i}"))
+        
+        if row:  # Add any remaining buttons
+            keyboard.append(row)
+    
+    # Add option to enter a different bank
+    keyboard.append([InlineKeyboardButton("Enter Different Bank", callback_data="enter_different_bank")])
+    
+    # Add the Done button at the bottom as well for convenience
+    keyboard.append([InlineKeyboardButton("✅ DONE - FINISH BANK ENTRY", callback_data="done_bank_selection")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Get summary of deposits so far
+    deposits_text = ""
+    if 'bank_deposits' in user_states[user_id] and user_states[user_id]['bank_deposits']:
+        deposits = user_states[user_id]['bank_deposits']
+        deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in deposits])
+        deposits_text = f"\n\n<b>Current deposits:</b>\n{deposits_summary}\n\n<b>Total:</b> {user_states[user_id].get('total_deposits', 0):.2f}"
+    
+    # Send the message with the keyboard
+    message_text = f"🏦 <b>Please select a bank or click Done when finished:</b>{deposits_text}"
+    
+    # Use the appropriate method based on the update type
+    if hasattr(update, 'message'):
+        update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode='HTML')
+    else:
+        # This is for handling cases where we need to send a new message after a callback query
+        context.bot.send_message(chat_id=user_id, text=message_text, reply_markup=reply_markup, parse_mode='HTML')
     for i, bank in enumerate(NEPAL_BANKS):
         if i % 3 == 0 and i > 0:
             keyboard.append(row)
@@ -741,10 +831,14 @@ def handle_conversation(update: Update, context) -> None:
             update.message.reply_text(
                 f"✅ <b>Remaining balance recorded: {remaining_balance:.2f}</b>\n\n"
                 f"This will be used as your starting balance.\n\n"
-                f"Now, please select a bank for your deposit:",
+                f"Now, please select a bank for your deposit or click Done when finished:",
                 parse_mode='HTML'
             )
-            show_bank_selection(update, context)
+            # Use the version with Done button instead of regular bank selection
+            if user_states[user_id].get('action') == 'deposit_entry':
+                show_bank_selection_with_done(update, context)
+            else:
+                show_bank_selection(update, context)
         except ValueError:
             update.message.reply_text(
                 "❗ Invalid number format. Please enter a valid number for the remaining balance:"
@@ -1642,6 +1736,37 @@ def button_callback(update: Update, context) -> None:
         query.edit_message_text(text="Starting custom bank addition process...")
         start_add_custom_bank(update, context)
         return
+    elif data == 'done_bank_selection':
+        # User is done with bank selection
+        if user_id in user_states and user_states[user_id].get('action') == 'deposit_entry':
+            # Check if any deposits were made
+            if 'bank_deposits' in user_states[user_id] and user_states[user_id]['bank_deposits']:
+                # Show summary of deposits
+                deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
+                total_deposits = user_states[user_id]['total_deposits']
+                
+                query.edit_message_text(
+                    f"✅ <b>Bank deposit entry completed</b>\n\n"
+                    f"<b>Deposits recorded:</b>\n{deposits_summary}\n\n"
+                    f"<b>Total deposits:</b> {total_deposits:.2f}\n\n"
+                    f"Thank you for using the bank deposit entry feature!",
+                    parse_mode='HTML'
+                )
+            else:
+                # No deposits were made
+                query.edit_message_text(
+                    "❗ No deposits were recorded.\n\n"
+                    "You can start again using the /menu command."
+                )
+            
+            # Clear the user state
+            del user_states[user_id]
+        else:
+            query.edit_message_text(
+                "Operation cancelled. Use /menu to access other features."
+            )
+        return
+        
     elif data.startswith('select_bank_') or data.startswith('select_custom_bank_'):
         # User selected a bank from the list (either default or custom)
         if data.startswith('select_bank_'):
@@ -1663,6 +1788,7 @@ def button_callback(update: Update, context) -> None:
         # Process based on the action
         if user_states[user_id].get('action') == 'deposit_entry':
             query.edit_message_text(text=f"Selected bank: {selected_bank}\n\nPlease enter the deposit amount:")
+            user_states[user_id]['current_bank'] = selected_bank
             user_states[user_id]['state'] = 'waiting_for_deposit_amount'
         elif user_states[user_id].get('action') == 'limit_check':
             query.edit_message_text(text=f"Selected bank: {selected_bank}\n\nPlease enter the limit amount for this bank:")
@@ -1802,7 +1928,9 @@ def start_bank_deposit_entry(update: Update, context) -> None:
     # Initialize user state
     user_states[user_id] = {
         'state': 'selecting_bank',
-        'action': 'deposit_entry'
+        'action': 'deposit_entry',
+        'bank_deposits': [],  # Initialize bank_deposits list
+        'total_deposits': 0.0  # Initialize total_deposits
     }
     
     # Create a keyboard with Nepali banks and user's custom banks
@@ -1837,12 +1965,25 @@ def start_bank_deposit_entry(update: Update, context) -> None:
     if row:  # Add any remaining buttons
         keyboard.append(row)
     
+    # Add a Done button to exit the bank selection process
+    keyboard.append([InlineKeyboardButton("✅ Done", callback_data="done_bank_selection")])
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    update.callback_query.edit_message_text(
-        "🏦 Please select a bank:",
-        reply_markup=reply_markup
-    )
+    # Ask for remaining balance first if not already set
+    if 'remaining_balance' not in user_states[user_id]:
+        update.callback_query.edit_message_text(
+            "💰 <b>Please enter your remaining balance first:</b>\n\n"
+            "This will be used as your starting balance.\n\n"
+            "Enter 0 if you don't want to include a remaining balance.",
+            parse_mode='HTML'
+        )
+        user_states[user_id]['state'] = 'waiting_for_remaining_balance'
+    else:
+        update.callback_query.edit_message_text(
+            "🏦 Please select a bank or click Done when finished:",
+            reply_markup=reply_markup
+        )
 
 def start_remaining_limit_check(update: Update, context) -> None:
     """Start the process of checking remaining limit for a bank."""
@@ -1979,25 +2120,42 @@ def handle_conversation(update: Update, context) -> None:
             
             # Check if this is for bank deposit entry or CSV export
             if user_states[user_id].get('action') == 'deposit_entry':
-                selected_bank = user_states[user_id].get('selected_bank')
+                current_bank = user_states[user_id].get('current_bank')
                 
                 # Initialize bank deposits for this user if not already done
                 if user_id not in user_bank_deposits:
                     user_bank_deposits[user_id] = {}
                 
                 # Add to or update the deposit for this bank
-                if selected_bank in user_bank_deposits[user_id]:
-                    user_bank_deposits[user_id][selected_bank] += deposit_amount
+                if current_bank in user_bank_deposits[user_id]:
+                    user_bank_deposits[user_id][current_bank] += deposit_amount
                 else:
-                    user_bank_deposits[user_id][selected_bank] = deposit_amount
+                    user_bank_deposits[user_id][current_bank] = deposit_amount
                 
+                # Add to bank_deposits list for summary
+                if 'bank_deposits' not in user_states[user_id]:
+                    user_states[user_id]['bank_deposits'] = []
+                
+                user_states[user_id]['bank_deposits'].append({
+                    'bank': current_bank,
+                    'amount': deposit_amount
+                })
+                
+                # Update total deposits
+                if 'total_deposits' not in user_states[user_id]:
+                    user_states[user_id]['total_deposits'] = 0.0
+                user_states[user_id]['total_deposits'] += deposit_amount
+                
+                # Show deposit confirmation and return to bank selection
                 update.message.reply_text(
-                    f"✅ Deposit of {deposit_amount} recorded for {selected_bank}.\n\n"
-                    f"Current total deposit for {selected_bank}: {user_bank_deposits[user_id][selected_bank]}"
+                    f"✅ Deposit of {deposit_amount:.2f} recorded for {current_bank}.\n\n"
+                    f"Current total deposit: {user_states[user_id]['total_deposits']:.2f}\n\n"
+                    f"Select another bank or click Done when finished."
                 )
                 
-                # Clear the conversation state
-                del user_states[user_id]
+                # Show bank selection again with Done button
+                user_states[user_id]['state'] = 'selecting_bank'
+                show_bank_selection_with_done(update, context)
             else:
                 # Continue with the CSV export flow
                 user_states[user_id]['state'] = 'waiting_for_bank_name'
@@ -2046,10 +2204,14 @@ def handle_conversation(update: Update, context) -> None:
             update.message.reply_text(
                 f"✅ <b>Remaining balance recorded: {remaining_balance:.2f}</b>\n\n"
                 f"This will be used as your starting balance.\n\n"
-                f"Now, please select a bank for your deposit:",
+                f"Now, please select a bank for your deposit or click Done when finished:",
                 parse_mode='HTML'
             )
-            show_bank_selection(update, context)
+            # Use the version with Done button instead of regular bank selection
+            if user_states[user_id].get('action') == 'deposit_entry':
+                show_bank_selection_with_done(update, context)
+            else:
+                show_bank_selection(update, context)
         except ValueError:
             update.message.reply_text(
                 "❗ Invalid number format. Please enter a valid number for the remaining balance:"
