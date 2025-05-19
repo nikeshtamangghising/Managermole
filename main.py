@@ -1,4 +1,3 @@
-
 import re
 import logging
 import os
@@ -2801,8 +2800,7 @@ def main():
                 updater.start_polling(
                     timeout=60,  # Increased timeout
                     drop_pending_updates=True,  # Ignore old messages
-                    allowed_updates=['message', 'callback_query', 'chat_member'],  # Specify updates we care about
-                    clean=True  # Ensure clean start
+                    allowed_updates=['message', 'callback_query', 'chat_member']  # Specify updates we care about
                 )
                 logging.info("Bot started successfully")
                 break  # Exit the retry loop if successful
