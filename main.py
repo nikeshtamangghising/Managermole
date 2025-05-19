@@ -1128,26 +1128,26 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
         return
 
     # Calculate the total deposit (sum of amounts)
-            total_deposit = 0
-            
-            # First add the previous balance if it exists and we're not using it as a special entry
-            if previous_balance > 0 and not (use_manual_input and 'bank_deposits' in user_states[user_id] and 
-                                           any(d['bank'] == 'Previous Balance' for d in bank_deposits)):
-                total_deposit += previous_balance
-                
-            # Then add all the amounts
-            for amount_str in amounts:
-                # Remove any currency symbol
-                numeric_str = re.sub(r'[€$£¥]', '', amount_str)
-                # Replace comma with period if needed
-                if decimal_separator == ',':
-                    numeric_str = numeric_str.replace(',', '.')
-                # Convert to float and add to sum
-                try:
-                    total_deposit += float(numeric_str)
-                except ValueError:
-                    # Skip if conversion fails
-                    pass
+    total_deposit = 0
+    
+    # First add the previous balance if it exists and we're not using it as a special entry
+    if previous_balance > 0 and not (use_manual_input and 'bank_deposits' in user_states[user_id] and 
+                                   any(d['bank'] == 'Previous Balance' for d in bank_deposits)):
+        total_deposit += previous_balance
+        
+    # Then add all the amounts
+    for amount_str in amounts:
+        # Remove any currency symbol
+        numeric_str = re.sub(r'[€$£¥]', '', amount_str)
+        # Replace comma with period if needed
+        if decimal_separator == ',':
+            numeric_str = numeric_str.replace(',', '.')
+        # Convert to float and add to sum
+        try:
+            total_deposit += float(numeric_str)
+        except ValueError:
+            # Skip if conversion fails
+            pass
     
     # Calculate the total paid (sum of charges)
     total_paid = 0
