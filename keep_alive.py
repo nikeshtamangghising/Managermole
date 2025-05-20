@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, render_template_string
 from threading import Thread
 import logging
 import os

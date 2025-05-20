@@ -53,6 +53,16 @@ SHUTDOWN_IN_PROGRESS = False
 BOT_INSTANCE_LOCK = threading.Lock()
 lock_file_handle = None
 
+# User data dictionaries
+user_messages = {}
+user_preferences = {}
+DEFAULT_PREFERENCES = {
+    'decimal_separator': '.',
+    'include_currency': True,
+    'output_format': 'simple',
+    'silent_collection': False
+}
+
 def signal_handler(sig, frame):
     """Handle termination signals to ensure graceful shutdown."""
     logging.info(f"Received signal {sig}, initiating graceful shutdown...")
