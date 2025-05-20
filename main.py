@@ -9,6 +9,7 @@ import threading
 import random
 import atexit
 import sys
+import psutil
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
@@ -54,26 +55,65 @@ def signal_handler(sig, frame):
     graceful_shutdown(bot_updater, bot_lock_socket)
     sys.exit(0)
 
+def kill_existing_instances():
+    """Kill any existing instances of the bot."""
+    current_pid = os.getpid()
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            # Check if this is a Python process running our bot
+            if proc.info['name'] == 'python' and any('main.py' in cmd for cmd in proc.info['cmdline']):
+                if proc.info['pid'] != current_pid:  # Don't kill ourselves
+                    logging.info(f"Killing existing bot instance with PID {proc.info['pid']}")
+                    proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
 def cleanup_lock_file():
     """Clean up the lock file if it exists."""
     try:
         if os.path.exists(LOCK_FILE):
             os.remove(LOCK_FILE)
+            logging.info("Removed lock file")
     except Exception as e:
         logging.error(f"Error cleaning up lock file: {e}")
+
+def cleanup_webhook():
+    """Clean up any existing webhooks for the bot."""
+    try:
+        cleanup_bot = Bot(BOT_TOKEN)
+        cleanup_bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Cleaned up existing webhook")
+        del cleanup_bot
+    except Exception as e:
+        logging.error(f"Error cleaning up webhook: {e}")
+
+def cleanup_sockets():
+    """Clean up any existing socket connections."""
+    try:
+        # Close the lock socket if it exists
+        global bot_lock_socket
+        if bot_lock_socket:
+            try:
+                bot_lock_socket.close()
+                logging.info("Closed lock socket")
+            except Exception as e:
+                logging.error(f"Error closing lock socket: {e}")
+        
+        # Close any other sockets we might have created
+        if hasattr(socket, '_socketobject'):
+            for sock in socket._socketobject._instances:
+                try:
+                    sock.close()
+                except:
+                    pass
+    except Exception as e:
+        logging.error(f"Error during socket cleanup: {e}")
 
 def create_socket_lock():
     """Create a socket-based lock to ensure only one instance of the bot runs."""
     # First, try to kill any existing instances
-    try:
-        kill_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        kill_socket.settimeout(1)
-        kill_socket.connect(('localhost', LOCK_PORT))
-        kill_socket.send(b'kill')
-        kill_socket.close()
-        time.sleep(5)
-    except Exception as e:
-        logging.error(f"Error killing existing instances: {e}")
+    kill_existing_instances()
+    time.sleep(5)  # Wait for processes to be killed
     
     # Create a new socket for locking
     lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -244,38 +284,6 @@ def error_handler(update, context):
         logging.error(f"Error in error handler: {e}")
         import traceback
         logging.error(traceback.format_exc())
-
-def cleanup_sockets():
-    """Clean up any existing socket connections."""
-    try:
-        # Close the lock socket if it exists
-        global bot_lock_socket
-        if bot_lock_socket:
-            try:
-                bot_lock_socket.close()
-                logging.info("Closed lock socket")
-            except Exception as e:
-                logging.error(f"Error closing lock socket: {e}")
-        
-        # Close any other sockets we might have created
-        if hasattr(socket, '_socketobject'):
-            for sock in socket._socketobject._instances:
-                try:
-                    sock.close()
-                except:
-                    pass
-    except Exception as e:
-        logging.error(f"Error during socket cleanup: {e}")
-
-def cleanup_webhook():
-    """Clean up any existing webhooks for the bot."""
-    try:
-        cleanup_bot = Bot(BOT_TOKEN)
-        cleanup_bot.delete_webhook(drop_pending_updates=True)
-        logging.info("Cleaned up existing webhook")
-        del cleanup_bot
-    except Exception as e:
-        logging.error(f"Error cleaning up webhook: {e}")
 
 def start(update: Update, context) -> None:
     """Send a message when the command /start is issued."""
@@ -2080,25 +2088,16 @@ def main():
     """Start the bot with enhanced instance management."""
     global bot_updater, bot_lock_socket
     
-    # Check if another instance is running using lock file
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE, 'r') as f:
-                pid = int(f.read().strip())
-                try:
-                    os.kill(pid, 0)  # Check if process exists
-                    logging.error(f"Another instance (PID: {pid}) is already running")
-                    sys.exit(1)
-                except OSError:
-                    # Process doesn't exist, clean up lock file
-                    cleanup_lock_file()
-        except Exception as e:
-            logging.error(f"Error checking lock file: {e}")
-            cleanup_lock_file()
+    # Kill any existing instances first
+    kill_existing_instances()
     
-    # Clean up any existing webhooks and sockets
+    # Clean up any existing resources
     cleanup_webhook()
     cleanup_sockets()
+    cleanup_lock_file()
+    
+    # Wait for resources to be available
+    time.sleep(10)
     
     # Get socket lock
     lock_socket = create_socket_lock()
@@ -2113,9 +2112,6 @@ def main():
         if lock_socket:
             lock_socket.close()
         return
-    
-    # Wait for resources to be available
-    time.sleep(20)  # Increased wait time
     
     updater = None
     
@@ -2184,6 +2180,7 @@ def main():
                 try:
                     cleanup_webhook()
                     cleanup_sockets()
+                    kill_existing_instances()
                     
                     if hasattr(updater, 'stop'):
                         updater.stop()
@@ -2233,6 +2230,7 @@ def main():
         logging.info("Performing cleanup")
         cleanup_webhook()
         cleanup_sockets()
+        kill_existing_instances()
         graceful_shutdown(updater, lock_socket)
         logging.info("Cleanup complete")
 
@@ -2243,22 +2241,21 @@ if __name__ == "__main__":
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
         
-        # Check if another instance is already running before starting
-        test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # Try to bind to the lock port - this will fail if another instance is running
-            test_socket.bind(('localhost', LOCK_PORT))
-            test_socket.close()
-            # If we get here, no other instance is running, so we can start
-            logging.info("No other instances detected, starting bot...")
-            main()
-        except socket.error:
-            # Another instance is already running
-            logging.error("Another instance of the bot is already running. Exiting.")
-            test_socket.close()
-            sys.exit(1)
+        # Kill any existing instances before starting
+        kill_existing_instances()
+        
+        # Clean up any existing resources
+        cleanup_webhook()
+        cleanup_sockets()
+        cleanup_lock_file()
+        
+        # Wait for resources to be available
+        time.sleep(10)
+        
+        # Start the bot
+        main()
     except Exception as e:
-        logging.critical(f"Critical error during startup check: {e}")
+        logging.critical(f"Critical error during startup: {e}")
         import traceback
         logging.critical(traceback.format_exc())
         sys.exit(1)
