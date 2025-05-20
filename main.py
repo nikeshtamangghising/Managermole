@@ -193,29 +193,29 @@ def graceful_shutdown(updater=None, lock_socket=None):
             try:
                 updater.bot.delete_webhook(drop_pending_updates=True)
                 logging.info("Deleted webhook during shutdown")
-            except:
-                pass
-            
+            except Exception as e:
+                logging.error(f"Error deleting webhook: {e}")
+        
         # Stop the updater
         if updater:
             try:
                 updater.stop()
                 logging.info("Stopped updater")
-            except:
-                pass
+            except Exception as e:
+                logging.error(f"Error stopping updater: {e}")
         
         # Release thread lock
         if BOT_INSTANCE_LOCK.locked():
             BOT_INSTANCE_LOCK.release()
             logging.info("Released thread lock")
-    
+        
         # Close socket lock
         if lock_socket:
             try:
                 lock_socket.close()
                 logging.info("Closed socket lock")
-            except:
-                pass
+            except Exception as e:
+                logging.error(f"Error closing socket lock: {e}")
         
         # Additional cleanup
         try:
@@ -225,8 +225,8 @@ def graceful_shutdown(updater=None, lock_socket=None):
                     sock.close()
                 except:
                     pass
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"Error during socket cleanup: {e}")
             
     except Exception as e:
         logging.error(f"Error during shutdown: {e}")
