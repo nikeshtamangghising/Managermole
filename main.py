@@ -187,32 +187,32 @@ def graceful_shutdown(updater=None, lock_socket=None):
     SHUTDOWN_IN_PROGRESS = True
     logging.info("Starting graceful shutdown...")
     
-        try:
+    try:
         # First, try to delete webhook
         if updater and hasattr(updater, 'bot'):
-                try:
-                    updater.bot.delete_webhook(drop_pending_updates=True)
-                    logging.info("Deleted webhook during shutdown")
+            try:
+                updater.bot.delete_webhook(drop_pending_updates=True)
+                logging.info("Deleted webhook during shutdown")
             except:
                 pass
             
         # Stop the updater
         if updater:
             try:
-            updater.stop()
+                updater.stop()
                 logging.info("Stopped updater")
             except:
                 pass
         
         # Release thread lock
-    if BOT_INSTANCE_LOCK.locked():
-        BOT_INSTANCE_LOCK.release()
+        if BOT_INSTANCE_LOCK.locked():
+            BOT_INSTANCE_LOCK.release()
             logging.info("Released thread lock")
     
         # Close socket lock
-    if lock_socket:
-        try:
-            lock_socket.close()
+        if lock_socket:
+            try:
+                lock_socket.close()
                 logging.info("Closed socket lock")
             except:
                 pass
@@ -231,7 +231,7 @@ def graceful_shutdown(updater=None, lock_socket=None):
     except Exception as e:
         logging.error(f"Error during shutdown: {e}")
     finally:
-    SHUTDOWN_IN_PROGRESS = False
+        SHUTDOWN_IN_PROGRESS = False
         logging.info("Shutdown complete")
 
 def error_handler(update, context):
@@ -938,7 +938,7 @@ def handle_conversation(update: Update, context) -> None:
         
         # Check if bank already exists in default list
         if bank_name in NEPAL_BANKS:
-        update.message.reply_text(
+            update.message.reply_text(
                 f"❗ '{bank_name}' already exists in the default bank list. Please enter a different name:"
             )
             return
@@ -946,66 +946,12 @@ def handle_conversation(update: Update, context) -> None:
         # Set the current bank and transition to deposit amount entry
         user_states[user_id]['current_bank'] = bank_name
         user_states[user_id]['state'] = 'waiting_for_deposit_amount'
-            
-            update.message.reply_text(
+        
+        update.message.reply_text(
             f"✅ Bank name '{bank_name}' has been set.\n\n"
             f"Please enter the deposit amount for {bank_name}:"
-            )
-            return
-    
-    elif state == 'waiting_for_deposit_amount':
-        # Try to parse the deposit amount
-        try:
-            # Remove any currency symbols and convert to float
-            numeric_str = re.sub(r'[€$£¥]', '', text)
-            # Handle both decimal separators
-            if ',' in numeric_str and '.' not in numeric_str:
-                numeric_str = numeric_str.replace(',', '.')
-            
-            deposit_amount = float(numeric_str)
-            
-            # Get the current bank
-            current_bank = user_states[user_id]['current_bank']
-            
-            # Initialize bank_deposits list if it doesn't exist
-            if 'bank_deposits' not in user_states[user_id]:
-                user_states[user_id]['bank_deposits'] = []
-            
-            # Add to bank deposits list
-            user_states[user_id]['bank_deposits'].append({
-                'bank': current_bank,
-                'amount': deposit_amount
-            })
-            
-            # Update running total of deposits
-            user_states[user_id]['total_deposits'] += deposit_amount
-            
-            # Calculate current balance
-            current_balance = user_states[user_id]['total_deposits'] - user_states[user_id].get('total_paid', 0)
-            
-            # Ask if user wants to add another bank deposit
-            keyboard = [
-                [InlineKeyboardButton("Add Another Bank Deposit", callback_data='add_another_bank')],
-                [InlineKeyboardButton("Finish and Export CSV", callback_data='finish_csv_export')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            # Show summary of current deposits with improved formatting
-            deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
-            
-            update.message.reply_text(
-                f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
-                f"<b>Current deposits:</b>\n{deposits_summary}\n\n"
-                f"<b>Running total:</b> {user_states[user_id]['total_deposits']:.2f}\n"
-                f"<b>Current balance:</b> {current_balance:.2f}\n\n"
-                f"<b>Would you like to add another bank deposit or finish?</b>",
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
-        except ValueError:
-            update.message.reply_text(
-                "❗ Invalid amount. Please enter a valid number for the deposit amount:"
-            )
+        )
+        return
     
     elif state == 'waiting_for_remaining_balance':
         # Try to parse the remaining balance
@@ -1031,9 +977,9 @@ def handle_conversation(update: Update, context) -> None:
             show_bank_selection_with_done(update, context)
             
         except ValueError:
-        update.message.reply_text(
+            update.message.reply_text(
                 "❗ Invalid number format. Please enter a valid number for the remaining balance:"
-        )
+            )
     
     elif state == 'waiting_for_csv_path':
         if text == '1':
@@ -1303,16 +1249,13 @@ def export_simple_csv(update: Update, context) -> None:
         )
 
 def process_export_csv(update: Update, context, use_manual_input=False) -> None:
-    """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Remaining Balance.
-    Maintains a running balance by using the previous day's remaining balance as today's starting balance.
-    Supports multiple bank deposits on the same day and provides detailed summaries."""
+    """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Remaining Balance."""
     # Determine if this is called from a callback query or directly
     if hasattr(update, 'callback_query') and update.callback_query is not None:
         query = update.callback_query
         user_id = query.from_user.id
         message = query.message
     else:
-        # Handle the case when update.effective_user might be None
         if hasattr(update, 'effective_user') and update.effective_user is not None:
             user_id = update.effective_user.id
             message = update.message
@@ -1320,7 +1263,6 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             user_id = update.message.from_user.id
             message = update.message
         else:
-            # Fallback for when we can't determine the user_id
             logger.error("Could not determine user_id from update object")
             return
 
@@ -1349,33 +1291,16 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     
     # Use manual input if requested
     if use_manual_input and user_id in user_states:
-        # Get the manually entered remaining balance
         manual_remaining_balance = user_states[user_id].get('remaining_balance')
         csv_path = user_states[user_id].get('csv_path')
         
-        # Get multiple bank deposits if available
         if 'bank_deposits' in user_states[user_id] and user_states[user_id]['bank_deposits']:
             bank_deposits = user_states[user_id]['bank_deposits']
             
-            # Add all bank deposits to amounts list for processing
             for deposit in bank_deposits:
                 deposit_amount = deposit['amount']
-                # Convert to string with appropriate format
                 deposit_str = str(int(deposit_amount) if deposit_amount.is_integer() else deposit_amount)
                 amounts.append(deposit_str)
-        else:
-            # Fallback to old single deposit method if no bank_deposits list
-            deposit_amount = user_states[user_id].get('deposit_amount')
-            bank_name = user_states[user_id].get('bank_name')
-            
-            if deposit_amount is not None and bank_name is not None:
-                # Convert to string with appropriate format
-                deposit_str = str(int(deposit_amount) if deposit_amount.is_integer() else deposit_amount)
-                amounts.append(deposit_str)
-                bank_deposits.append({
-                    'bank': bank_name,
-                    'amount': deposit_amount
-                })
     else:
         csv_path = None
         manual_remaining_balance = None
@@ -1383,7 +1308,6 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     # Variable to store previous day's balance
     previous_balance = 0.0
     
-    # If user manually entered a remaining balance, use it instead of reading from file
     if manual_remaining_balance is not None:
         previous_balance = manual_remaining_balance
         logger.info(f"Using manually entered remaining balance: {previous_balance}")
@@ -1392,300 +1316,137 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     if not use_manual_input or not amounts:
         for message_data in user_messages[user_id]:
             message_text = message_data['text']
-
-            # Find all matches in the message
             matches = re.findall(pattern, message_text)
 
             for match in matches:
                 currency, original_number, processed_number, value, has_decimal = extract_number_value(match, decimal_separator, message_text)
-
-                # Format the extracted value
                 extracted_value = f"{currency}{processed_number}" if currency and preferences['include_currency'] else processed_number
 
-                # Add to appropriate category
                 if value > AMOUNT_THRESHOLD:
                     amounts.append(extracted_value)
                 else:
                     charges.append(extracted_value)
 
     if not amounts and not charges:
-        message.reply_text(
-            f"❗ I couldn't find any numbers in your collected messages."
-        )
+        message.reply_text("❗ I couldn't find any numbers in your collected messages.")
         return
 
     # Calculate the total deposit (sum of amounts)
     total_deposit = 0
     
-    # First add the previous balance if it exists and we're not using it as a special entry
     if previous_balance > 0 and not (use_manual_input and 'bank_deposits' in user_states[user_id] and 
                                    any(d['bank'] == 'Previous Balance' for d in bank_deposits)):
         total_deposit += previous_balance
         
-    # Then add all the amounts
     for amount_str in amounts:
-        # Remove any currency symbol
         numeric_str = re.sub(r'[€$£¥]', '', amount_str)
-        # Replace comma with period if needed
         if decimal_separator == ',':
             numeric_str = numeric_str.replace(',', '.')
-        # Convert to float and add to sum
         try:
             total_deposit += float(numeric_str)
         except ValueError:
-            # Skip if conversion fails
             pass
     
     # Calculate the total paid (sum of charges)
     total_paid = 0
     for charge_str in charges:
-        # Remove any currency symbol
         numeric_str = re.sub(r'[€$£¥]', '', charge_str)
-        # Replace comma with period if needed
         if decimal_separator == ',':
             numeric_str = numeric_str.replace(',', '.')
-        # Convert to float and add to sum
         try:
             total_paid += float(numeric_str)
         except ValueError:
-            # Skip if conversion fails
             pass
     
     # Calculate the balance (total deposit - total paid)
     balance = total_deposit - total_paid
-    
-    # Format the totals to match the screenshot format - always show 2 decimal places
-    total_deposit_str = f"{total_deposit:.2f}"
-    total_paid_str = f"{total_paid:.2f}"
-    balance_str = f"{balance:.2f}"
 
     # Determine the CSV file path
     if csv_path and os.path.isfile(csv_path):
         filename = csv_path
         file_exists = True
-        # Store the path for future use
         user_csv_files[user_id] = csv_path
     else:
-        # Create a new CSV file with the requested format using current month
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        current_month = datetime.now().strftime('%B_%Y')  # e.g., "March_2024"
+        current_month = datetime.now().strftime('%B_%Y')
         filename = os.path.join(current_dir, f"decimal_stripper_export_{current_month}.csv")
         file_exists = False
-        # Store the path for future use
         user_csv_files[user_id] = filename
 
     try:
         if file_exists:
-            # Read existing file to get current totals and previous day's balance
-            existing_totals = {'total_deposit': 0, 'total_paid': 0, 'balance': 0}
-            try:
-                with open(filename, 'r', newline='', encoding='utf-8') as csvfile:
-                    reader = csv.reader(csvfile)
-                    rows = list(reader)
-                    
-                    # Check if file has the expected format
-                    if len(rows) > 0 and 'Date' in rows[0] and 'Total Deposit' in rows[0]:
-                        # Find the totals row (usually the last non-empty row)
-                        for row in reversed(rows):
-                            if row and row[4] and row[5] and row[6]:  # Total columns have values
-                                try:
-                                    existing_totals['total_deposit'] = float(row[4])
-                                    existing_totals['total_paid'] = float(row[5])
-                                    existing_totals['balance'] = float(row[6])
-                                    previous_balance = existing_totals['balance']  # Set previous day's balance
-                                    break
-                                except ValueError:
-                                    pass
-            except Exception as e:
-                logger.error(f"Error reading existing CSV: {e}")
-                # Continue with new file if reading fails
-                file_exists = False
-            
-            # Open file in append mode
             mode = 'a'
-            
-            # If we have a previous balance, handle it appropriately
-            if previous_balance > 0:
-                if use_manual_input:
-                    # If user manually entered a remaining balance, inform them
-                    if user_id in user_states and user_states[user_id].get('remaining_balance') is not None:
-                        message.reply_text(f"Note: Using your manually entered remaining balance of {previous_balance}. This will be included in your total calculations.")
-                    else:
-                        # Using previous balance from file
-                        message.reply_text(f"Note: Previous day's remaining balance was {previous_balance}. This will be included in your total calculations.")
-                else:
-                    # Add previous balance as a special entry
-                    bank_deposits.insert(0, {
-                        'bank': "Previous Balance",
-                        'amount': previous_balance
-                    })
-            
-            # Calculate new totals
-            # Always include previous balance in calculations
-            total_deposit += existing_totals['total_deposit']
-            total_paid += existing_totals['total_paid']
-            
-            # Calculate the final balance
-            balance = total_deposit - total_paid
-            
-            # Log the balance calculation for debugging
-            logger.debug(f"Balance calculation: {total_deposit} - {total_paid} = {balance}")
-            logger.debug(f"Previous balance: {previous_balance}")
-            
-            # Inform user about the running balance
-            if previous_balance > 0:
-                message.reply_text(f"Your running balance includes the previous day's balance of {previous_balance}.")
-
         else:
-            # Create new file
             mode = 'w'
         
         with open(filename, mode, newline='', encoding='utf-8') as csvfile:
-            # Create writer
             writer = csv.writer(csvfile)
             
-            # Write header if creating a new file
             if not file_exists:
-                fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Total Deposit', 'Total Paid', 'Remaining Balance']
+                fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Remaining Balance']
                 writer.writerow(fieldnames)
             
-            # If we have manually entered bank deposits, write each one with improved formatting
+            # Write bank deposits first
             if bank_deposits:
-                # Sort deposits to ensure Previous Balance comes first if it exists
                 sorted_deposits = sorted(bank_deposits, key=lambda x: 0 if x['bank'] == 'Previous Balance' else 1)
                 
                 for i, deposit in enumerate(sorted_deposits):
                     bank_name = deposit['bank']
                     deposit_amount = deposit['amount']
-                    
-                    # Format the deposit amount with two decimal places
                     deposit_amount_formatted = f"{float(deposit_amount):.2f}"
                     
-                    # Write the deposit information
-                    # Only include date in the first row
                     if i == 0:
-                        deposit_row = [current_date, deposit_amount_formatted, bank_name, '', '', '', '']
+                        deposit_row = [current_date, deposit_amount_formatted, bank_name, '', '']
                     else:
-                        deposit_row = ['', deposit_amount_formatted, bank_name, '', '', '', '']
+                        deposit_row = ['', deposit_amount_formatted, bank_name, '', '']
                     writer.writerow(deposit_row)
-            else:
-                # No manually entered deposits, use the first amount from extracted data
-                deposit_amount_formatted = ''
-                if amounts and amounts[0]:
-                    try:
-                        # Remove any currency symbol and convert to float
-                        numeric_str = re.sub(r'[€$£¥]', '', amounts[0])
-                        # Handle both decimal separators
-                        if decimal_separator == ',':
-                            numeric_str = numeric_str.replace(',', '.')
-                        # Always format with 2 decimal places for consistency
-                        deposit_amount_formatted = f"{float(numeric_str):.2f}"
-                    except ValueError:
-                        deposit_amount_formatted = amounts[0]
-                
-                # Write the deposit information in the first row
-                deposit_row = [current_date, deposit_amount_formatted, "Remaining Balance", '', '', '', '']
-                writer.writerow(deposit_row)
             
-            # Write the charges (payments) in subsequent rows with running subtotals
+            # Write charges with running sums
             running_paid = 0.0
-            running_total = 0.0
-            
-            # Process amounts and charges together
-            max_rows = max(len(amounts), len(charges))
-            for i in range(max_rows):
-                amount_value = 0.0
-                charge_value = 0.0
-                
-                # Get amount if available
-                if i < len(amounts):
-                    try:
-                        # Remove any currency symbol and convert to float
-                        numeric_str = re.sub(r'[€$£¥]', '', amounts[i])
-                        # Handle both decimal separators
-                        if decimal_separator == ',':
-                            numeric_str = numeric_str.replace(',', '.')
-                        amount_value = float(numeric_str)
-                    except ValueError:
-                        amount_value = 0.0
-                
-                # Get charge if available
-                if i < len(charges):
+            for i in range(len(charges)):
+                charge_str = charges[i]
+                numeric_str = re.sub(r'[€$£¥]', '', charge_str)
+                if decimal_separator == ',':
+                    numeric_str = numeric_str.replace(',', '.')
                 try:
-                    # Remove any currency symbol and convert to float
-                    numeric_str = re.sub(r'[€$£¥]', '', charges[i])
-                    # Handle both decimal separators
-                    if decimal_separator == ',':
-                        numeric_str = numeric_str.replace(',', '.')
                     charge_value = float(numeric_str)
-                except ValueError:
-                        charge_value = 0.0
-                
-                # Calculate row total (amount + charge)
-                row_total = amount_value + charge_value
-                running_total += row_total
-                
-                # Format the values for display
-                amount_formatted = f"{amount_value:.2f}" if amount_value != 0 else ''
-                charge_formatted = f"{charge_value:.2f}" if charge_value != 0 else ''
-                row_total_formatted = f"{row_total:.2f}" if row_total != 0 else ''
-                
-                # Write the row with amount, charge, and their sum
-                if amount_value != 0 or charge_value != 0:
-                    row = ['', amount_formatted, '', charge_formatted, '', '', '']
-                    writer.writerow(row)
+                    running_paid += charge_value
                     
-                    # Write the sum in the next row
-                    if row_total != 0:
-                        sum_row = ['', '', '', f"Row Total: {row_total_formatted}", '', '', '']
-                        writer.writerow(sum_row)
-                
-                # Update running totals
-                running_paid += charge_value
+                    # Write the charge row
+                    charge_row = ['', '', '', f"{charge_value:.2f}", '']
+                    writer.writerow(charge_row)
+                    
+                    # Write the running sum row
+                    sum_row = ['', '', '', f"Running Sum: {running_paid:.2f}", '']
+                    writer.writerow(sum_row)
+                except ValueError:
+                    continue
             
-            # Add empty row before totals
-            writer.writerow(['', '', '', '', '', '', ''])
-            
-            # Calculate running totals for the bottom row
-            # Format the totals with two decimal places
-            total_deposit_formatted = f"{total_deposit:.2f}"
-            total_paid_formatted = f"{total_paid:.2f}"
-            balance_formatted = f"{balance:.2f}"
-            
-            # Write the totals row at the bottom with proper labels and formatting
-            writer.writerow(['', '', '', '', '', '', ''])  # Empty row for spacing
-            totals_row = ['', 'SUMMARY', '', 'TOTALS:', total_deposit_formatted, total_paid_formatted, balance_formatted]
+            # Write final totals
+            writer.writerow(['', '', '', '', ''])
+            totals_row = ['', 'Total Deposit', '', 'Total Paid', 'Remaining Balance']
             writer.writerow(totals_row)
-            
-            # Add a footer with additional information
-            writer.writerow(['', '', '', '', '', '', ''])  # Empty row for spacing
-            writer.writerow(['', 'Report generated on:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '', '', '', ''])
-            if bank_deposits:
-                writer.writerow(['', 'Banks included:', ', '.join([deposit['bank'] for deposit in bank_deposits]), '', '', '', ''])
+            values_row = ['', f"{total_deposit:.2f}", '', f"{total_paid:.2f}", f"{balance:.2f}"]
+            writer.writerow(values_row)
 
-        # Send the file to the user with improved caption
+        # Send the file to the user
         with open(filename, 'rb') as file:
             message.reply_document(
                 document=file,
                 filename=os.path.basename(filename),
-                caption=f"📊 Enhanced CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Remaining Balance.\n\nThe file includes:\n- Multiple bank deposits with their respective amounts ({len(bank_deposits)} banks included)\n- Individual payments in the Paid To Host column ({len(charges)} payments recorded)\n- Row totals showing sum of amount and charge for each entry\n- Running totals with automatic calculations\n- Previous balance of {previous_balance:.2f} included in calculations\n- Final remaining balance: {balance:.2f}\n- Improved formatting for better readability"
+                caption=f"📊 CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Remaining Balance.\n\nThe file includes:\n- Bank deposits with their respective amounts\n- Individual payments with running sums\n- Final totals and remaining balance"
             )
 
-        # Don't remove the file if it's a user-specified path
         if not csv_path:
             os.remove(filename)
 
-        # Clear the conversation state
         if user_id in user_states:
             del user_states[user_id]
 
     except Exception as e:
         logger.error(f"Error exporting CSV: {e}")
-        message.reply_text(
-            f"❗ Sorry, there was an error creating your CSV file: {str(e)}"
-        )
+        message.reply_text(f"❗ Sorry, there was an error creating your CSV file: {str(e)}")
         
-        # Clear the conversation state on error
         if user_id in user_states:
             del user_states[user_id]
 
@@ -2386,7 +2147,8 @@ def main():
         kill_socket.send(b'kill')
         kill_socket.close()
         time.sleep(5)
-                except:
+    except Exception as e:
+        logger.error(f"Error killing existing instances: {e}")
         pass
     
     # Get socket lock
@@ -2419,7 +2181,8 @@ def main():
             cleanup_bot.delete_webhook(drop_pending_updates=True)
             time.sleep(15)  # Longer wait time
             del cleanup_bot
-        except:
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
             pass
         
         # Create updater with correct timeout parameters
@@ -2483,7 +2246,7 @@ def main():
                         updater.bot.delete_webhook(drop_pending_updates=True)
                     
                     if hasattr(updater, 'stop'):
-                            updater.stop()
+                        updater.stop()
                     
                     if hasattr(dp, '_update_fetcher'):
                         if hasattr(dp._update_fetcher, 'running'):
