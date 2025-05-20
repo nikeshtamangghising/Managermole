@@ -2201,33 +2201,12 @@ def main():
     # Clean up any existing resources
     cleanup_resources()
     
-    # Acquire thread lock to ensure only one instance runs
-    global BOT_INSTANCE_LOCK
-    if not BOT_INSTANCE_LOCK.acquire(blocking=False):
-        logging.error("Failed to acquire thread lock - another instance may be running")
-        # Attempt to clean up any existing instances
-        cleanup_resources()
-        return
-        
     # Wait for resources to be available
-    time.sleep(5)
+    time.sleep(10)
     
     # Try to acquire file lock
     if not acquire_file_lock():
         logging.error("Failed to acquire file lock - exiting")
-        # Release thread lock before returning
-        if BOT_INSTANCE_LOCK.locked():
-            BOT_INSTANCE_LOCK.release()
-        return
-    
-    # Create socket lock
-    bot_lock_socket = create_socket_lock()
-    if not bot_lock_socket:
-        logging.error("Failed to create socket lock - exiting")
-        # Release thread lock and file lock before returning
-        if BOT_INSTANCE_LOCK.locked():
-            BOT_INSTANCE_LOCK.release()
-        release_file_lock()
         return
     
     # Write PID to file
@@ -2237,8 +2216,6 @@ def main():
     except Exception as e:
         logging.error(f"Error writing PID file: {e}")
         release_file_lock()
-        if BOT_INSTANCE_LOCK.locked():
-            BOT_INSTANCE_LOCK.release()
         return
     
     updater = None
@@ -2282,9 +2259,8 @@ def main():
                 logging.info(f"Attempt {retry_count + 1}/{max_retries} to start bot")
                 
                 # Clean up resources before each attempt
-                # Don't call cleanup_resources() here as it might interfere with running instances
-                # Just reset the update fetcher state
-                time.sleep(5)
+                cleanup_resources()
+                time.sleep(15)
                 
                 if hasattr(dp, '_update_fetcher'):
                     dp._update_fetcher._last_update_id = 0
@@ -2292,7 +2268,7 @@ def main():
                 # Start polling with correct parameters
                 updater.start_polling(
                     timeout=120,  # Longer timeout
-                    drop_pending_updates=True,  # Use drop_pending_updates instead of deprecated clean parameter
+                    drop_pending_updates=True,
                     allowed_updates=['message', 'callback_query', 'chat_member'],
                     bootstrap_retries=5  # More bootstrap retries
                 )
