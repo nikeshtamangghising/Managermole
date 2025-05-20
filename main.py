@@ -157,7 +157,8 @@ def cleanup_webhook():
     """Clean up any existing webhooks for the bot."""
     try:
         cleanup_bot = Bot(BOT_TOKEN)
-        cleanup_bot.delete_webhook(drop_pending_updates=True)
+        # Don't use drop_pending_updates here to avoid conflicts
+        cleanup_bot.delete_webhook()
         logging.info("Cleaned up existing webhook")
         del cleanup_bot
     except Exception as e:
@@ -203,33 +204,43 @@ def create_socket_lock():
         # Set socket to non-blocking mode
         lock_socket.setblocking(False)
         
-        # Try to bind to the lock port
-        lock_socket.bind(('localhost', LOCK_PORT))
-        
-        # Set a longer timeout
-        lock_socket.settimeout(60)
-        
-        # Create lock file
-        with open(LOCK_FILE, 'w') as f:
-            f.write(str(os.getpid()))
-        
-        # Register cleanup function
-        atexit.register(cleanup_lock_file)
-        
-        # Start a more robust heartbeat mechanism
-        def keep_socket_alive():
-            while True:
-                try:
-                    lock_socket.sendto(b'heartbeat', ('localhost', LOCK_PORT))
-                    time.sleep(5)  # More frequent heartbeats
-                except:
-                    break
-        
-        heartbeat_thread = threading.Thread(target=keep_socket_alive, daemon=True)
-        heartbeat_thread.start()
-        
-        logging.info("Successfully acquired socket lock")
-        return lock_socket
+        try:
+            # Try to bind to the lock port
+            lock_socket.bind(('localhost', LOCK_PORT))
+            
+            # Set a longer timeout
+            lock_socket.settimeout(60)
+            
+            # Create lock file
+            with open(LOCK_FILE, 'w') as f:
+                f.write(str(os.getpid()))
+            
+            # Register cleanup function
+            atexit.register(cleanup_lock_file)
+            
+            # Start a more robust heartbeat mechanism
+            def keep_socket_alive():
+                while True:
+                    try:
+                        lock_socket.sendto(b'heartbeat', ('localhost', LOCK_PORT))
+                        time.sleep(5)  # More frequent heartbeats
+                    except:
+                        break
+            
+            heartbeat_thread = threading.Thread(target=keep_socket_alive, daemon=True)
+            heartbeat_thread.start()
+            
+            logging.info("Successfully acquired socket lock")
+            return lock_socket
+            
+        except socket.error as bind_error:
+            logging.error(f"Failed to bind to lock port: {bind_error}")
+            # Port is already in use, another instance is running
+            try:
+                lock_socket.close()
+            except:
+                pass
+            return None
     except socket.error as e:
         logging.error(f"Failed to acquire socket lock: {e}")
         try:
@@ -249,10 +260,10 @@ def graceful_shutdown(updater=None, lock_socket=None):
     logging.info("Starting graceful shutdown...")
     
     try:
-        # First, try to delete webhook
+        # First, try to delete webhook without drop_pending_updates
         if updater and hasattr(updater, 'bot'):
             try:
-                updater.bot.delete_webhook(drop_pending_updates=True)
+                updater.bot.delete_webhook()
                 logging.info("Deleted webhook during shutdown")
             except Exception as e:
                 logging.error(f"Error deleting webhook: {e}")
@@ -266,9 +277,13 @@ def graceful_shutdown(updater=None, lock_socket=None):
                 logging.error(f"Error stopping updater: {e}")
         
         # Release thread lock
+        global BOT_INSTANCE_LOCK
         if BOT_INSTANCE_LOCK.locked():
-            BOT_INSTANCE_LOCK.release()
-            logging.info("Released thread lock")
+            try:
+                BOT_INSTANCE_LOCK.release()
+                logging.info("Released thread lock")
+            except Exception as e:
+                logging.error(f"Error releasing thread lock: {e}")
         
         # Close socket lock
         if lock_socket:
@@ -280,6 +295,9 @@ def graceful_shutdown(updater=None, lock_socket=None):
         
         # Clean up lock file
         cleanup_lock_file()
+        
+        # Release file lock
+        release_file_lock()
         
         # Additional cleanup
         try:
@@ -315,10 +333,10 @@ def error_handler(update, context):
             
             # More aggressive cleanup
             try:
-                # Delete webhook and drop pending updates
+                # Delete webhook without drop_pending_updates to avoid conflicts
                 if hasattr(context, 'bot'):
-                    context.bot.delete_webhook(drop_pending_updates=True)
-                    logging.info("Deleted webhook and dropped pending updates")
+                    context.bot.delete_webhook()
+                    logging.info("Deleted webhook during conflict resolution")
                 
                 # Reset update fetcher state
                 if hasattr(context.dispatcher, '_update_fetcher'):
@@ -2170,12 +2188,31 @@ def main():
     # Clean up any existing resources
     cleanup_resources()
     
+    # Acquire thread lock to ensure only one instance runs
+    global BOT_INSTANCE_LOCK
+    if not BOT_INSTANCE_LOCK.acquire(blocking=False):
+        logging.error("Failed to acquire thread lock - another instance may be running")
+        return
+        
     # Wait for resources to be available
-    time.sleep(10)
+    time.sleep(5)
     
     # Try to acquire file lock
     if not acquire_file_lock():
         logging.error("Failed to acquire file lock - exiting")
+        # Release thread lock before returning
+        if BOT_INSTANCE_LOCK.locked():
+            BOT_INSTANCE_LOCK.release()
+        return
+    
+    # Create socket lock
+    bot_lock_socket = create_socket_lock()
+    if not bot_lock_socket:
+        logging.error("Failed to create socket lock - exiting")
+        # Release thread lock and file lock before returning
+        if BOT_INSTANCE_LOCK.locked():
+            BOT_INSTANCE_LOCK.release()
+        release_file_lock()
         return
     
     # Write PID to file
@@ -2184,6 +2221,9 @@ def main():
             f.write(str(os.getpid()))
     except Exception as e:
         logging.error(f"Error writing PID file: {e}")
+        release_file_lock()
+        if BOT_INSTANCE_LOCK.locked():
+            BOT_INSTANCE_LOCK.release()
         return
     
     updater = None
@@ -2227,16 +2267,17 @@ def main():
                 logging.info(f"Attempt {retry_count + 1}/{max_retries} to start bot")
                 
                 # Clean up resources before each attempt
-                cleanup_resources()
-                time.sleep(15)
+                # Don't call cleanup_resources() here as it might interfere with running instances
+                # Just reset the update fetcher state
+                time.sleep(5)
                 
                 if hasattr(dp, '_update_fetcher'):
                     dp._update_fetcher._last_update_id = 0
                 
-                # Start polling with correct parameters
+                # Start polling with correct parameters - removed drop_pending_updates
                 updater.start_polling(
                     timeout=120,  # Longer timeout
-                    drop_pending_updates=True,
+                    clean=True,  # Use clean instead of drop_pending_updates
                     allowed_updates=['message', 'callback_query', 'chat_member'],
                     bootstrap_retries=5  # More bootstrap retries
                 )
@@ -2300,7 +2341,7 @@ def main():
     finally:
         logging.info("Performing cleanup")
         cleanup_resources()
-        graceful_shutdown(updater, lock_socket)
+        graceful_shutdown(updater, bot_lock_socket)
         logging.info("Cleanup complete")
 
 if __name__ == "__main__":
