@@ -188,7 +188,6 @@ def error_handler(update, context):
         if isinstance(context.error, Conflict):
             logging.warning("Conflict error: Another instance of the bot is already running")
             # Implement a more sophisticated recovery strategy
-            # First, log detailed information about the conflict
             logging.info(f"Detailed conflict error: {context.error}")
             logging.info("Attempting to resolve conflict situation...")
             
@@ -197,92 +196,72 @@ def error_handler(update, context):
             if not BOT_INSTANCE_LOCK.locked():
                 logging.warning("Thread lock not held by this instance - this instance should terminate")
                 # Force exit this instance
-                return
-                
-            # Wait longer to ensure the other instance has a chance to stabilize
-            recovery_wait = 30  # Increased wait time for better recovery chances
-            logging.info(f"Waiting {recovery_wait} seconds before attempting recovery")
-            time.sleep(recovery_wait)
+                sys.exit(1)
             
+            # More aggressive cleanup
             try:
-                # More thorough cleanup process
-                if hasattr(context, 'bot') and hasattr(context.bot, 'get_updates'):
-                    # First, delete any webhook to ensure we're in polling mode
+                # Delete webhook and drop pending updates
+                if hasattr(context, 'bot'):
                     context.bot.delete_webhook(drop_pending_updates=True)
                     logging.info("Deleted webhook and dropped pending updates")
+                
+                # Reset update fetcher state
+                if hasattr(context.dispatcher, '_update_fetcher'):
+                    if hasattr(context.dispatcher._update_fetcher, '_last_update_id'):
+                        context.dispatcher._update_fetcher._last_update_id = 0
+                        logging.info("Reset update ID to 0")
                     
-                    # Reset the update fetcher state completely
-                    if hasattr(context.dispatcher, '_update_fetcher'):
-                        if hasattr(context.dispatcher._update_fetcher, '_last_update_id'):
-                            # Reset to 0 to force a fresh start
-                            context.dispatcher._update_fetcher._last_update_id = 0
-                            logging.info("Reset update ID to 0")
-                        
-                        # Try to stop the update fetcher if it's running
-                        if hasattr(context.dispatcher._update_fetcher, 'running') and context.dispatcher._update_fetcher.running:
-                            logging.info("Attempting to stop the update fetcher")
-                            context.dispatcher._update_fetcher.running = False
-                            
-                            # Force a complete restart of the update fetcher
-                            if hasattr(context.dispatcher, 'start_polling'):
-                                try:
-                                    # Stop and restart polling with clean state
-                                    context.dispatcher.stop()
-                                    time.sleep(5)  # Wait for complete stop
-                                    context.dispatcher.start_polling(drop_pending_updates=True)
-                                    logging.info("Restarted polling with clean state")
-                                except Exception as restart_error:
-                                    logging.error(f"Failed to restart polling: {restart_error}")
-                    
-                    # Add a delay to ensure changes take effect
-                    time.sleep(5)
-                    logging.info("Completed enhanced conflict recovery process")
-                else:
-                    logging.warning("Could not access bot or get_updates method for recovery")
+                    # Stop the update fetcher if it's running
+                    if hasattr(context.dispatcher._update_fetcher, 'running'):
+                        context.dispatcher._update_fetcher.running = False
+                        logging.info("Stopped update fetcher")
+                
+                # Force cleanup of any remaining sockets
+                for sock in [s for s in socket.socket() if s.fileno() > 0]:
+                    try:
+                        sock.close()
+                    except:
+                        pass
+                
+                # Clean up lock file
+                cleanup_lock_file()
+                
+                # Wait longer to ensure cleanup is complete
+                time.sleep(30)
+                
+                # Force exit this instance
+                sys.exit(1)
+                
             except Exception as e:
                 logging.error(f"Failed to recover from conflict: {e}")
-                # Log the full traceback for better debugging
                 import traceback
                 logging.error(traceback.format_exc())
-                # Signal that this instance should terminate
-                logging.critical("Recovery failed - this instance should terminate")
+                sys.exit(1)
                 
-                # Try to release resources before terminating
-                try:
-                    if hasattr(context, 'dispatcher') and hasattr(context.dispatcher, 'stop'):
-                        context.dispatcher.stop()
-                        logging.info("Stopped dispatcher during failed recovery")
-                except Exception as cleanup_error:
-                    logging.error(f"Error during cleanup: {cleanup_error}")
         elif isinstance(context.error, NetworkError):
             logging.error(f"Network error: {context.error}. Waiting before retry.")
-            # Implement exponential backoff for network errors
-            backoff_time = 25 + (5 * random.random())  # Base time plus some randomization
+            backoff_time = 25 + (5 * random.random())
             logging.info(f"Backing off for {backoff_time:.1f} seconds")
-            time.sleep(backoff_time)  # Increased wait time for network errors
+            time.sleep(backoff_time)
         else:
-            # Get update information safely
             update_str = str(update) if update else "None"
             logging.error(f"Update {update_str} caused error: {context.error}")
-            
-            # For other errors, log more details for debugging
             import traceback
             logging.error(f"Error traceback: {traceback.format_exc()}")
     except Exception as e:
         logging.error(f"Error in error handler: {e}")
-        # Log the full traceback for better debugging
         import traceback
         logging.error(traceback.format_exc())
-        
-        # Try to recover from error in error handler
-        try:
-            if hasattr(context, 'dispatcher') and hasattr(context.dispatcher, 'update_queue'):
-                # Clear the update queue to prevent processing problematic updates
-                while not context.dispatcher.update_queue.empty():
-                    context.dispatcher.update_queue.get(False)
-                logging.info("Cleared update queue after error in error handler")
-        except Exception as recovery_error:
-            logging.error(f"Failed to recover from error in error handler: {recovery_error}")
+
+def cleanup_webhook():
+    """Clean up any existing webhooks for the bot."""
+    try:
+        cleanup_bot = Bot(BOT_TOKEN)
+        cleanup_bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Cleaned up existing webhook")
+        del cleanup_bot
+    except Exception as e:
+        logging.error(f"Error cleaning up webhook: {e}")
 
 def start(update: Update, context) -> None:
     """Send a message when the command /start is issued."""
@@ -2103,6 +2082,9 @@ def main():
             logging.error(f"Error checking lock file: {e}")
             cleanup_lock_file()
     
+    # Clean up any existing webhooks
+    cleanup_webhook()
+    
     # Get socket lock
     lock_socket = create_socket_lock()
     bot_lock_socket = lock_socket
@@ -2126,15 +2108,6 @@ def main():
         if not BOT_TOKEN:
             logging.error("Bot token not found")
             return
-        
-        # Aggressive cleanup of existing connections
-        try:
-            cleanup_bot = Bot(BOT_TOKEN)
-            cleanup_bot.delete_webhook(drop_pending_updates=True)
-            time.sleep(15)  # Longer wait time
-            del cleanup_bot
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
         
         # Create updater with correct timeout parameters
         updater = Updater(BOT_TOKEN, request_kwargs={
@@ -2169,8 +2142,8 @@ def main():
             try:
                 logging.info(f"Attempt {retry_count + 1}/{max_retries} to start bot")
                 
-                # Aggressive cleanup before each attempt
-                updater.bot.delete_webhook(drop_pending_updates=True)
+                # Clean up webhook before each attempt
+                cleanup_webhook()
                 time.sleep(15)
                 
                 if hasattr(dp, '_update_fetcher'):
@@ -2193,8 +2166,7 @@ def main():
                 
                 # Aggressive cleanup
                 try:
-                    if hasattr(updater, 'bot'):
-                        updater.bot.delete_webhook(drop_pending_updates=True)
+                    cleanup_webhook()
                     
                     if hasattr(updater, 'stop'):
                         updater.stop()
