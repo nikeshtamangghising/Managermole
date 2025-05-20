@@ -12,6 +12,7 @@ import sys
 import psutil
 import fcntl
 import errno
+import signal
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
@@ -158,11 +159,15 @@ def cleanup_webhook():
     try:
         cleanup_bot = Bot(BOT_TOKEN)
         # Don't use drop_pending_updates here to avoid conflicts
-        cleanup_bot.delete_webhook()
+        cleanup_bot.delete_webhook(drop_pending_updates=False)
         logging.info("Cleaned up existing webhook")
+        # Add a small delay to ensure webhook deletion is processed
+        time.sleep(2)
         del cleanup_bot
     except Exception as e:
         logging.error(f"Error cleaning up webhook: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
 
 def cleanup_sockets():
     """Clean up any existing socket connections."""
@@ -325,10 +330,11 @@ def error_handler(update, context):
             logging.info("Attempting to resolve conflict situation...")
             
             # Check if we should terminate this instance
-            global BOT_INSTANCE_LOCK
+            global BOT_INSTANCE_LOCK, bot_updater, bot_lock_socket
             if not BOT_INSTANCE_LOCK.locked():
                 logging.warning("Thread lock not held by this instance - this instance should terminate")
-                # Force exit this instance
+                # Force exit this instance after cleanup
+                cleanup_resources()
                 sys.exit(1)
             
             # More aggressive cleanup
@@ -349,8 +355,11 @@ def error_handler(update, context):
                         context.dispatcher._update_fetcher.running = False
                         logging.info("Stopped update fetcher")
                 
-                # Clean up lock file
-                cleanup_lock_file()
+                # Perform full cleanup
+                cleanup_resources()
+                
+                # Perform graceful shutdown
+                graceful_shutdown(bot_updater, bot_lock_socket)
                 
                 # Wait longer to ensure cleanup is complete
                 time.sleep(30)
@@ -2182,6 +2191,10 @@ def main():
     """Start the bot with enhanced instance management."""
     global bot_updater, bot_lock_socket
     
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # Kill any existing instances first
     kill_existing_instances()
     
@@ -2192,6 +2205,8 @@ def main():
     global BOT_INSTANCE_LOCK
     if not BOT_INSTANCE_LOCK.acquire(blocking=False):
         logging.error("Failed to acquire thread lock - another instance may be running")
+        # Attempt to clean up any existing instances
+        cleanup_resources()
         return
         
     # Wait for resources to be available
@@ -2274,10 +2289,10 @@ def main():
                 if hasattr(dp, '_update_fetcher'):
                     dp._update_fetcher._last_update_id = 0
                 
-                # Start polling with correct parameters - removed drop_pending_updates
+                # Start polling with correct parameters
                 updater.start_polling(
                     timeout=120,  # Longer timeout
-                    clean=True,  # Use clean instead of drop_pending_updates
+                    drop_pending_updates=True,  # Use drop_pending_updates instead of deprecated clean parameter
                     allowed_updates=['message', 'callback_query', 'chat_member'],
                     bootstrap_retries=5  # More bootstrap retries
                 )
@@ -2291,19 +2306,28 @@ def main():
                 
                 # Aggressive cleanup
                 try:
-                    cleanup_resources()
-                    kill_existing_instances()
-                    
+                    # First stop the updater if it's running
                     if hasattr(updater, 'stop'):
                         updater.stop()
+                        logging.info("Stopped updater during conflict resolution")
                     
+                    # Reset update fetcher state
                     if hasattr(dp, '_update_fetcher'):
                         if hasattr(dp._update_fetcher, 'running'):
                             dp._update_fetcher.running = False
                             dp._update_fetcher._last_update_id = 0
+                            logging.info("Reset update fetcher during conflict resolution")
+                    
+                    # Perform full cleanup
+                    cleanup_resources()
+                    
+                    # Kill any existing instances
+                    kill_existing_instances()
                             
                 except Exception as cleanup_error:
                     logging.error(f"Error during conflict cleanup: {cleanup_error}")
+                    import traceback
+                    logging.error(traceback.format_exc())
                 
                 if retry_count >= max_retries:
                     logging.error("Maximum retry attempts reached")
