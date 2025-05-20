@@ -7,6 +7,8 @@ import json
 import socket
 import threading
 import random
+import atexit
+import sys
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
@@ -24,7 +26,6 @@ try:
 except ImportError:
     logging.warning("python-dotenv not installed. Using environment variables directly.")
 
-
 # Enable logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -34,108 +35,38 @@ logger = logging.getLogger(__name__)
 
 # Constants
 AMOUNT_THRESHOLD = 50  # Values above this are considered amounts, otherwise charges
+LOCK_PORT = 10001
+LOCK_FILE = "bot.lock"
 
 # Replace with your actual bot token - consider using an environment variable instead
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
-# Dictionary to store collected messages for each user
-user_messages = {}
-
-# Dictionary to store user preferences
-user_preferences = {}
-
-# Default preferences
-DEFAULT_PREFERENCES = {
-    'decimal_separator': '.',  # Can be '.' or ','
-    'include_currency': False,  # Whether to include currency symbols in output
-    'output_format': 'simple',  # 'simple', 'detailed', or 'csv'
-    'silent_collection': True   # Don't reply to every message during collection
-}
-
-# List of banks in Nepal
-NEPAL_BANKS = [
-    "Nepal Rastra Bank",
-    "Agricultural Development Bank",
-    "Nepal Bank Limited",
-    "Rastriya Banijya Bank",
-    "Nabil Bank",
-    "Nepal Investment Bank",
-    "Standard Chartered Bank Nepal",
-    "Himalayan Bank",
-    "Nepal SBI Bank",
-    "Nepal Bangladesh Bank",
-    "Everest Bank",
-    "Bank of Kathmandu",
-    "NCC Bank",
-    "NIC Asia Bank",
-    "Machhapuchhre Bank",
-    "Kumari Bank",
-    "Laxmi Bank",
-    "Siddhartha Bank",
-    "Global IME Bank",
-    "Citizens Bank International",
-    "Prime Commercial Bank",
-    "Sunrise Bank",
-    "Sanima Bank",
-    "Mega Bank Nepal",
-    "Civil Bank",
-    "Century Commercial Bank",
-    "Prabhu Bank",
-    "Janata Bank Nepal",
-    "Mahalaxmi Bikas Bank",
-    "Garima Bikas Bank",
-    "Muktinath Bikas Bank",
-    "Jyoti Bikas Bank",
-    "Excel Development Bank",
-    "Shine Resunga Development Bank",
-    "Tinau Development Bank",
-    "Miteri Development Bank",
-    "Green Development Bank",
-    "Sindhu Bikas Bank",
-    "Kamana Sewa Bikas Bank",
-    "Gandaki Bikas Bank",
-    "Lumbini Bikas Bank",
-    "Corporate Development Bank",
-    "Reliable Development Bank",
-    "Infrastructure Development Bank",
-    "Best Finance Company",
-    "Pokhara Finance",
-    "Goodwill Finance",
-    "Reliance Finance",
-    "Gurkhas Finance",
-    "ICFC Finance",
-    "Central Finance"
-]
-
-# Dictionary to store bank limits for each user
-user_bank_limits = {}
-
-# Dictionary to store bank deposits for each user
-user_bank_deposits = {}
-
-# Dictionary to store user-defined custom banks
-user_custom_banks = {}
-
-# Create a lock to ensure only one instance of the bot is running
+# Global variables
+bot_updater = None
+bot_lock_socket = None
+SHUTDOWN_IN_PROGRESS = False
 BOT_INSTANCE_LOCK = threading.Lock()
 
-# Flag to track if shutdown is in progress
-SHUTDOWN_IN_PROGRESS = False
+def cleanup_lock_file():
+    """Clean up the lock file if it exists."""
+    try:
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
+    except Exception as e:
+        logging.error(f"Error cleaning up lock file: {e}")
 
 def create_socket_lock():
     """Create a socket-based lock to ensure only one instance of the bot runs."""
-    lock_port = 10001
-    
     # First, try to kill any existing instances
     try:
         kill_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         kill_socket.settimeout(1)
-        kill_socket.connect(('localhost', lock_port))
+        kill_socket.connect(('localhost', LOCK_PORT))
         kill_socket.send(b'kill')
         kill_socket.close()
         time.sleep(5)
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"Error killing existing instances: {e}")
     
     # Create a new socket for locking
     lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -150,16 +81,23 @@ def create_socket_lock():
         lock_socket.setblocking(False)
         
         # Try to bind to the lock port
-        lock_socket.bind(('localhost', lock_port))
+        lock_socket.bind(('localhost', LOCK_PORT))
         
         # Set a longer timeout
         lock_socket.settimeout(60)
+        
+        # Create lock file
+        with open(LOCK_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+        
+        # Register cleanup function
+        atexit.register(cleanup_lock_file)
         
         # Start a more robust heartbeat mechanism
         def keep_socket_alive():
             while True:
                 try:
-                    lock_socket.sendto(b'heartbeat', ('localhost', lock_port))
+                    lock_socket.sendto(b'heartbeat', ('localhost', LOCK_PORT))
                     time.sleep(5)  # More frequent heartbeats
                 except:
                     break
@@ -216,6 +154,9 @@ def graceful_shutdown(updater=None, lock_socket=None):
                 logging.info("Closed socket lock")
             except Exception as e:
                 logging.error(f"Error closing socket lock: {e}")
+        
+        # Clean up lock file
+        cleanup_lock_file()
         
         # Additional cleanup
         try:
@@ -2139,17 +2080,21 @@ def main():
     """Start the bot with enhanced instance management."""
     global bot_updater, bot_lock_socket
     
-    # First, try to kill any existing instances
-    try:
-        kill_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        kill_socket.settimeout(1)
-        kill_socket.connect(('localhost', 10001))
-        kill_socket.send(b'kill')
-        kill_socket.close()
-        time.sleep(5)
-    except Exception as e:
-        logger.error(f"Error killing existing instances: {e}")
-        pass
+    # Check if another instance is running using lock file
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, 'r') as f:
+                pid = int(f.read().strip())
+                try:
+                    os.kill(pid, 0)  # Check if process exists
+                    logging.error(f"Another instance (PID: {pid}) is already running")
+                    sys.exit(1)
+                except OSError:
+                    # Process doesn't exist, clean up lock file
+                    cleanup_lock_file()
+        except Exception as e:
+            logging.error(f"Error checking lock file: {e}")
+            cleanup_lock_file()
     
     # Get socket lock
     lock_socket = create_socket_lock()
@@ -2183,7 +2128,6 @@ def main():
             del cleanup_bot
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
-            pass
         
         # Create updater with correct timeout parameters
         updater = Updater(BOT_TOKEN, request_kwargs={
@@ -2301,20 +2245,6 @@ def main():
         graceful_shutdown(updater, lock_socket)
         logging.info("Cleanup complete")
 
-
-# Global variables to track bot state
-bot_updater = None
-bot_lock_socket = None
-
-# Signal handler for graceful shutdown
-def signal_handler(sig, frame):
-    """Handle termination signals to ensure graceful shutdown."""
-    logging.info(f"Received signal {sig}, initiating graceful shutdown...")
-    global bot_updater, bot_lock_socket
-    graceful_shutdown(bot_updater, bot_lock_socket)
-    import sys
-    sys.exit(0)
-
 if __name__ == "__main__":
     try:
         # Register signal handlers for graceful shutdown
@@ -2326,7 +2256,7 @@ if __name__ == "__main__":
         test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             # Try to bind to the lock port - this will fail if another instance is running
-            test_socket.bind(('localhost', 10001))
+            test_socket.bind(('localhost', LOCK_PORT))
             test_socket.close()
             # If we get here, no other instance is running, so we can start
             logging.info("No other instances detected, starting bot...")
@@ -2335,11 +2265,9 @@ if __name__ == "__main__":
             # Another instance is already running
             logging.error("Another instance of the bot is already running. Exiting.")
             test_socket.close()
-            import sys
             sys.exit(1)
     except Exception as e:
         logging.critical(f"Critical error during startup check: {e}")
         import traceback
         logging.critical(traceback.format_exc())
-        import sys
         sys.exit(1)
