@@ -47,6 +47,13 @@ bot_lock_socket = None
 SHUTDOWN_IN_PROGRESS = False
 BOT_INSTANCE_LOCK = threading.Lock()
 
+def signal_handler(sig, frame):
+    """Handle termination signals to ensure graceful shutdown."""
+    logging.info(f"Received signal {sig}, initiating graceful shutdown...")
+    global bot_updater, bot_lock_socket
+    graceful_shutdown(bot_updater, bot_lock_socket)
+    sys.exit(0)
+
 def cleanup_lock_file():
     """Clean up the lock file if it exists."""
     try:
