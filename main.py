@@ -187,7 +187,6 @@ def error_handler(update, context):
     try:
         if isinstance(context.error, Conflict):
             logging.warning("Conflict error: Another instance of the bot is already running")
-            # Implement a more sophisticated recovery strategy
             logging.info(f"Detailed conflict error: {context.error}")
             logging.info("Attempting to resolve conflict situation...")
             
@@ -215,13 +214,6 @@ def error_handler(update, context):
                     if hasattr(context.dispatcher._update_fetcher, 'running'):
                         context.dispatcher._update_fetcher.running = False
                         logging.info("Stopped update fetcher")
-                
-                # Force cleanup of any remaining sockets
-                for sock in [s for s in socket.socket() if s.fileno() > 0]:
-                    try:
-                        sock.close()
-                    except:
-                        pass
                 
                 # Clean up lock file
                 cleanup_lock_file()
@@ -252,6 +244,28 @@ def error_handler(update, context):
         logging.error(f"Error in error handler: {e}")
         import traceback
         logging.error(traceback.format_exc())
+
+def cleanup_sockets():
+    """Clean up any existing socket connections."""
+    try:
+        # Close the lock socket if it exists
+        global bot_lock_socket
+        if bot_lock_socket:
+            try:
+                bot_lock_socket.close()
+                logging.info("Closed lock socket")
+            except Exception as e:
+                logging.error(f"Error closing lock socket: {e}")
+        
+        # Close any other sockets we might have created
+        if hasattr(socket, '_socketobject'):
+            for sock in socket._socketobject._instances:
+                try:
+                    sock.close()
+                except:
+                    pass
+    except Exception as e:
+        logging.error(f"Error during socket cleanup: {e}")
 
 def cleanup_webhook():
     """Clean up any existing webhooks for the bot."""
@@ -2082,8 +2096,9 @@ def main():
             logging.error(f"Error checking lock file: {e}")
             cleanup_lock_file()
     
-    # Clean up any existing webhooks
+    # Clean up any existing webhooks and sockets
     cleanup_webhook()
+    cleanup_sockets()
     
     # Get socket lock
     lock_socket = create_socket_lock()
@@ -2142,8 +2157,9 @@ def main():
             try:
                 logging.info(f"Attempt {retry_count + 1}/{max_retries} to start bot")
                 
-                # Clean up webhook before each attempt
+                # Clean up webhook and sockets before each attempt
                 cleanup_webhook()
+                cleanup_sockets()
                 time.sleep(15)
                 
                 if hasattr(dp, '_update_fetcher'):
@@ -2167,6 +2183,7 @@ def main():
                 # Aggressive cleanup
                 try:
                     cleanup_webhook()
+                    cleanup_sockets()
                     
                     if hasattr(updater, 'stop'):
                         updater.stop()
@@ -2175,13 +2192,6 @@ def main():
                         if hasattr(dp._update_fetcher, 'running'):
                             dp._update_fetcher.running = False
                             dp._update_fetcher._last_update_id = 0
-                        
-                    # Force cleanup of any remaining sockets
-                    for sock in [s for s in socket.socket() if s.fileno() > 0]:
-                        try:
-                            sock.close()
-                        except:
-                            pass
                             
                 except Exception as cleanup_error:
                     logging.error(f"Error during conflict cleanup: {cleanup_error}")
@@ -2221,6 +2231,8 @@ def main():
         logging.error(traceback.format_exc())
     finally:
         logging.info("Performing cleanup")
+        cleanup_webhook()
+        cleanup_sockets()
         graceful_shutdown(updater, lock_socket)
         logging.info("Cleanup complete")
 
