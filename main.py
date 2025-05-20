@@ -10,6 +10,8 @@ import random
 import atexit
 import sys
 import psutil
+import fcntl
+import errno
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
@@ -38,6 +40,7 @@ logger = logging.getLogger(__name__)
 AMOUNT_THRESHOLD = 50  # Values above this are considered amounts, otherwise charges
 LOCK_PORT = 10001
 LOCK_FILE = "bot.lock"
+PID_FILE = "bot.pid"
 
 # Replace with your actual bot token - consider using an environment variable instead
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -47,6 +50,7 @@ bot_updater = None
 bot_lock_socket = None
 SHUTDOWN_IN_PROGRESS = False
 BOT_INSTANCE_LOCK = threading.Lock()
+lock_file_handle = None
 
 def signal_handler(sig, frame):
     """Handle termination signals to ensure graceful shutdown."""
@@ -55,18 +59,90 @@ def signal_handler(sig, frame):
     graceful_shutdown(bot_updater, bot_lock_socket)
     sys.exit(0)
 
+def acquire_file_lock():
+    """Acquire an exclusive file lock."""
+    global lock_file_handle
+    try:
+        lock_file_handle = open(LOCK_FILE, 'w')
+        fcntl.flock(lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file_handle.write(str(os.getpid()))
+        lock_file_handle.flush()
+        return True
+    except IOError as e:
+        if e.errno == errno.EAGAIN:
+            logging.error("Another instance is already running")
+            return False
+        raise
+    except Exception as e:
+        logging.error(f"Error acquiring file lock: {e}")
+        return False
+
+def release_file_lock():
+    """Release the file lock."""
+    global lock_file_handle
+    try:
+        if lock_file_handle:
+            fcntl.flock(lock_file_handle, fcntl.LOCK_UN)
+            lock_file_handle.close()
+            lock_file_handle = None
+    except Exception as e:
+        logging.error(f"Error releasing file lock: {e}")
+
 def kill_existing_instances():
     """Kill any existing instances of the bot."""
     current_pid = os.getpid()
+    
+    # First try to kill using PID file
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, 'r') as f:
+                pid = int(f.read().strip())
+                if pid != current_pid:
+                    try:
+                        os.kill(pid, 9)  # SIGKILL
+                        logging.info(f"Killed process with PID {pid}")
+                    except OSError:
+                        pass
+        except Exception as e:
+            logging.error(f"Error reading PID file: {e}")
+        finally:
+            try:
+                os.remove(PID_FILE)
+            except:
+                pass
+    
+    # Then try to kill using psutil
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
-            # Check if this is a Python process running our bot
             if proc.info['name'] == 'python' and any('main.py' in cmd for cmd in proc.info['cmdline']):
-                if proc.info['pid'] != current_pid:  # Don't kill ourselves
+                if proc.info['pid'] != current_pid:
                     logging.info(f"Killing existing bot instance with PID {proc.info['pid']}")
                     proc.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
+
+def cleanup_resources():
+    """Clean up all resources."""
+    try:
+        # Clean up webhook
+        cleanup_webhook()
+        
+        # Clean up sockets
+        cleanup_sockets()
+        
+        # Clean up lock files
+        cleanup_lock_file()
+        
+        # Release file lock
+        release_file_lock()
+        
+        # Remove PID file
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+            
+        logging.info("All resources cleaned up")
+    except Exception as e:
+        logging.error(f"Error during cleanup: {e}")
 
 def cleanup_lock_file():
     """Clean up the lock file if it exists."""
@@ -2092,25 +2168,22 @@ def main():
     kill_existing_instances()
     
     # Clean up any existing resources
-    cleanup_webhook()
-    cleanup_sockets()
-    cleanup_lock_file()
+    cleanup_resources()
     
     # Wait for resources to be available
     time.sleep(10)
     
-    # Get socket lock
-    lock_socket = create_socket_lock()
-    bot_lock_socket = lock_socket
-    if not lock_socket:
-        logging.error("Failed to acquire socket lock - exiting")
+    # Try to acquire file lock
+    if not acquire_file_lock():
+        logging.error("Failed to acquire file lock - exiting")
         return
     
-    # Get thread lock
-    if not BOT_INSTANCE_LOCK.acquire(blocking=False):
-        logging.error("Failed to acquire thread lock - exiting")
-        if lock_socket:
-            lock_socket.close()
+    # Write PID to file
+    try:
+        with open(PID_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+    except Exception as e:
+        logging.error(f"Error writing PID file: {e}")
         return
     
     updater = None
@@ -2153,9 +2226,8 @@ def main():
             try:
                 logging.info(f"Attempt {retry_count + 1}/{max_retries} to start bot")
                 
-                # Clean up webhook and sockets before each attempt
-                cleanup_webhook()
-                cleanup_sockets()
+                # Clean up resources before each attempt
+                cleanup_resources()
                 time.sleep(15)
                 
                 if hasattr(dp, '_update_fetcher'):
@@ -2178,8 +2250,7 @@ def main():
                 
                 # Aggressive cleanup
                 try:
-                    cleanup_webhook()
-                    cleanup_sockets()
+                    cleanup_resources()
                     kill_existing_instances()
                     
                     if hasattr(updater, 'stop'):
@@ -2228,9 +2299,7 @@ def main():
         logging.error(traceback.format_exc())
     finally:
         logging.info("Performing cleanup")
-        cleanup_webhook()
-        cleanup_sockets()
-        kill_existing_instances()
+        cleanup_resources()
         graceful_shutdown(updater, lock_socket)
         logging.info("Cleanup complete")
 
@@ -2245,9 +2314,7 @@ if __name__ == "__main__":
         kill_existing_instances()
         
         # Clean up any existing resources
-        cleanup_webhook()
-        cleanup_sockets()
-        cleanup_lock_file()
+        cleanup_resources()
         
         # Wait for resources to be available
         time.sleep(10)
