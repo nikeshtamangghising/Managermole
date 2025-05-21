@@ -10,10 +10,6 @@ import socket
 
 app = Flask('')
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # HTML template for the home page
 HOME_TEMPLATE = '''
 <!DOCTYPE html>
@@ -141,45 +137,49 @@ def health():
     }
 
 def run():
+    # Use a different port than the one used for the socket lock in main.py
+    # The socket lock uses port 10001, so we'll use a different port for Flask
+    port = int(os.getenv('PORT', 10000))  # Changed default from 8080 to 10000
+    
+    # Always avoid using port 10001 which is used for the socket lock
+    if port == 10001:
+        port = 10000
+        logging.info(f"Changed Flask port to {port} to avoid conflict with socket lock")
+    
     try:
-        # Use gunicorn if available, otherwise fall back to Flask's development server
-        try:
-            import gunicorn.app.base
-            from gunicorn.six import iteritems
-            
-            class StandaloneApplication(gunicorn.app.base.BaseApplication):
-                def __init__(self, app, options=None):
-                    self.options = options or {}
-                    self.application = app
-                    super(StandaloneApplication, self).__init__()
-
-                def load_config(self):
-                    config = dict([(key, value) for key, value in iteritems(self.options)
-                                 if key in self.cfg.settings and value is not None])
-                    for key, value in iteritems(config):
-                        self.cfg.set(key.lower(), value)
-
-                def load(self):
-                    return self.application
-
-            options = {
-                'bind': '%s:%s' % ('0.0.0.0', '10000'),
-                'workers': 1,
-                'worker_class': 'sync',
-                'timeout': 120,
-                'keepalive': 5,
-                'accesslog': '-',
-                'errorlog': '-',
-                'loglevel': 'info'
-            }
-            
-            StandaloneApplication(app, options).run()
-        except ImportError:
-            # Fall back to Flask's development server if gunicorn is not available
-            app.run(host='0.0.0.0', port=10000)
-            
+        app.run(
+            host='0.0.0.0',
+            port=port,
+            debug=False,
+            threaded=True  # Ensure Flask runs in threaded mode
+        )
+    except OSError as e:
+        # Handle case where port is already in use
+        if "Address already in use" in str(e):
+            logging.warning(f"Port {port} already in use, trying alternate port")
+            try:
+                # Try an alternate port
+                alt_port = port + 1
+                if alt_port == 10001:  # Skip the lock port
+                    alt_port += 1
+                logging.info(f"Attempting to use alternate port {alt_port}")
+                app.run(
+                    host='0.0.0.0',
+                    port=alt_port,
+                    debug=False,
+                    threaded=True
+                )
+            except Exception as inner_e:
+                logging.error(f"Failed to start on alternate port: {inner_e}")
+                return False
+        else:
+            logging.error(f"Failed to start Flask server: {e}")
+            return False
     except Exception as e:
-        logger.error(f"Error in keep_alive server: {e}")
+        logging.error(f"Unexpected error starting Flask server: {e}")
+        return False
+    
+    return True
 
 # Track start time for uptime calculation
 START_TIME = datetime.now()
@@ -199,6 +199,33 @@ def self_ping():
             time.sleep(30)  # Wait 30 seconds before retrying
 
 def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True
-    t.start()
+    """Start a Flask server to keep the bot alive.
+    
+    Returns:
+        bool: True if the server started successfully, False otherwise
+    """
+    try:
+        # Check if the port is already in use
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)  # 2 second timeout
+        result = sock.connect_ex(('localhost', 10000))
+        sock.close()
+        
+        if result == 0:  # Port is already in use
+            logging.warning("Port 10000 is already in use - another instance may be running")
+            logging.info("Using existing keep-alive server")
+            return True
+            
+        # Start the Flask server in a separate thread
+        server_thread = Thread(target=run)
+        server_thread.daemon = True  # Thread will close when the main program exits
+        server_thread.start()
+        
+        # Wait a moment to ensure the server starts properly
+        time.sleep(1)
+        logging.info("Keep-alive server started successfully")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to start keep-alive server: {e}")
+        # Continue anyway - the bot can run without the keep-alive server
+        return False

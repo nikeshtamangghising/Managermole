@@ -7,14 +7,8 @@ import json
 import socket
 import threading
 import random
-import atexit
-import sys
-import psutil
-import fcntl
-import errno
-import signal
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
 from telegram.error import Conflict, TelegramError, NetworkError
 
@@ -30,6 +24,7 @@ try:
 except ImportError:
     logging.warning("python-dotenv not installed. Using environment variables directly.")
 
+
 # Enable logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -39,692 +34,307 @@ logger = logging.getLogger(__name__)
 
 # Constants
 AMOUNT_THRESHOLD = 50  # Values above this are considered amounts, otherwise charges
-LOCK_PORT = 10001
-LOCK_FILE = "bot.lock"
-PID_FILE = "bot.pid"
 
 # Replace with your actual bot token - consider using an environment variable instead
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
-# Global variables
-bot_updater = None
-bot_lock_socket = None
-SHUTDOWN_IN_PROGRESS = False
-BOT_INSTANCE_LOCK = threading.Lock()
-lock_file_handle = None
-
-# User data dictionaries
+# Dictionary to store collected messages for each user
 user_messages = {}
+
+# Dictionary to store user preferences
 user_preferences = {}
+
+# Default preferences
 DEFAULT_PREFERENCES = {
-    'decimal_separator': '.',
-    'include_currency': True,
-    'output_format': 'simple',
-    'silent_collection': False
+    'decimal_separator': '.',  # Can be '.' or ','
+    'include_currency': False,  # Whether to include currency symbols in output
+    'output_format': 'simple',  # 'simple', 'detailed', or 'csv'
+    'silent_collection': True   # Don't reply to every message during collection
 }
 
-def signal_handler(sig, frame):
-    """Handle termination signals to ensure graceful shutdown."""
-    logging.info(f"Received signal {sig}, initiating graceful shutdown...")
-    global bot_updater, bot_lock_socket
-    graceful_shutdown(bot_updater, bot_lock_socket)
-    sys.exit(0)
+# List of banks in Nepal
+NEPAL_BANKS = [
+    "Nepal Rastra Bank",
+    "Agricultural Development Bank",
+    "Nepal Bank Limited",
+    "Rastriya Banijya Bank",
+    "Nabil Bank",
+    "Nepal Investment Bank",
+    "Standard Chartered Bank Nepal",
+    "Himalayan Bank",
+    "Nepal SBI Bank",
+    "Nepal Bangladesh Bank",
+    "Everest Bank",
+    "Bank of Kathmandu",
+    "NCC Bank",
+    "NIC Asia Bank",
+    "Machhapuchhre Bank",
+    "Kumari Bank",
+    "Laxmi Bank",
+    "Siddhartha Bank",
+    "Global IME Bank",
+    "Citizens Bank International",
+    "Prime Commercial Bank",
+    "Sunrise Bank",
+    "Sanima Bank",
+    "Mega Bank Nepal",
+    "Civil Bank",
+    "Century Commercial Bank",
+    "Prabhu Bank",
+    "Janata Bank Nepal",
+    "Mahalaxmi Bikas Bank",
+    "Garima Bikas Bank",
+    "Muktinath Bikas Bank",
+    "Jyoti Bikas Bank",
+    "Excel Development Bank",
+    "Shine Resunga Development Bank",
+    "Tinau Development Bank",
+    "Miteri Development Bank",
+    "Green Development Bank",
+    "Sindhu Bikas Bank",
+    "Kamana Sewa Bikas Bank",
+    "Gandaki Bikas Bank",
+    "Lumbini Bikas Bank",
+    "Corporate Development Bank",
+    "Reliable Development Bank",
+    "Infrastructure Development Bank",
+    "Best Finance Company",
+    "Pokhara Finance",
+    "Goodwill Finance",
+    "Reliance Finance",
+    "Gurkhas Finance",
+    "ICFC Finance",
+    "Central Finance"
+]
 
-def acquire_file_lock():
-    """Acquire an exclusive file lock."""
-    global lock_file_handle
-    try:
-        # First check if lock file exists and contains a valid PID
-        if os.path.exists(LOCK_FILE):
-            try:
-                with open(LOCK_FILE, 'r') as f:
-                    pid = int(f.read().strip())
-                    # Check if process with this PID exists
-                    try:
-                        os.kill(pid, 0)  # Signal 0 just checks if process exists
-                        logging.warning(f"Process with PID {pid} already holds the lock")
-                        return False
-                    except OSError:
-                        # Process doesn't exist, we can proceed
-                        logging.info(f"Stale lock file found with PID {pid}, proceeding")
-                        # Don't remove the file here, we'll overwrite it
-            except (ValueError, IOError) as e:
-                logging.warning(f"Invalid lock file found: {e}, proceeding")
-                # Don't remove the file here, we'll overwrite it
-        
-        # Try to acquire the lock
-        lock_file_handle = open(LOCK_FILE, 'w')
-        fcntl.flock(lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        lock_file_handle.write(str(os.getpid()))
-        lock_file_handle.flush()
-        logging.info(f"Successfully acquired file lock with PID {os.getpid()}")
-        return True
-    except IOError as e:
-        if e.errno == errno.EAGAIN:
-            logging.error("Another instance is already running")
-            return False
-        raise
-    except Exception as e:
-        logging.error(f"Error acquiring file lock: {e}")
-        return False
+# Dictionary to store bank limits for each user
+user_bank_limits = {}
 
-def release_file_lock():
-    """Release the file lock."""
-    global lock_file_handle
-    try:
-        if lock_file_handle:
-            fcntl.flock(lock_file_handle, fcntl.LOCK_UN)
-            lock_file_handle.close()
-            lock_file_handle = None
-    except Exception as e:
-        logging.error(f"Error releasing file lock: {e}")
+# Dictionary to store bank deposits for each user
+user_bank_deposits = {}
 
-def kill_existing_instances():
-    """Kill any existing instances of the bot."""
-    current_pid = os.getpid()
-    
-    # First try to kill using PID file
-    if os.path.exists(PID_FILE):
-        try:
-            with open(PID_FILE, 'r') as f:
-                pid = int(f.read().strip())
-                if pid != current_pid:
-                    try:
-                        os.kill(pid, 9)  # SIGKILL
-                        logging.info(f"Killed process with PID {pid}")
-                    except OSError:
-                        pass
-        except Exception as e:
-            logging.error(f"Error reading PID file: {e}")
-        finally:
-            try:
-                os.remove(PID_FILE)
-            except:
-                pass
-    
-    # Then try to kill using psutil
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            if proc.info['name'] == 'python' and any('main.py' in cmd for cmd in proc.info['cmdline']):
-                if proc.info['pid'] != current_pid:
-                    logging.info(f"Killing existing bot instance with PID {proc.info['pid']}")
-                    proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
+# Dictionary to store user-defined custom banks
+user_custom_banks = {}
 
-def cleanup_resources():
-    """Clean up all resources."""
-    try:
-        # Clean up webhook
-        cleanup_webhook()
-        
-        # Clean up sockets
-        cleanup_sockets()
-        
-        # Clean up lock files
-        cleanup_lock_file()
-        
-        # Release file lock
-        release_file_lock()
-        
-        # Release thread lock if we're holding it
-        global BOT_INSTANCE_LOCK
-        if BOT_INSTANCE_LOCK.locked():
-            try:
-                BOT_INSTANCE_LOCK.release()
-                logging.info("Released thread lock during cleanup")
-            except Exception as lock_error:
-                logging.error(f"Error releasing thread lock: {lock_error}")
-        
-        # Remove PID file
-        if os.path.exists(PID_FILE):
-            try:
-                os.remove(PID_FILE)
-                logging.info("Removed PID file")
-            except Exception as pid_error:
-                logging.error(f"Error removing PID file: {pid_error}")
-            
-        logging.info("All resources cleaned up")
-    except Exception as e:
-        logging.error(f"Error during cleanup: {e}")
-        import traceback
-        logging.error(traceback.format_exc())
+# Create a lock to ensure only one instance of the bot is running
+BOT_INSTANCE_LOCK = threading.Lock()
 
-def cleanup_lock_file():
-    """Clean up the lock file if it exists."""
-    try:
-        if os.path.exists(LOCK_FILE):
-            os.remove(LOCK_FILE)
-            logging.info("Removed lock file")
-    except Exception as e:
-        logging.error(f"Error cleaning up lock file: {e}")
-
-def cleanup_webhook():
-    """Clean up any existing webhooks for the bot with improved error handling."""
-    max_attempts = 3
-    attempt = 0
-    while attempt < max_attempts:
-        try:
-            attempt += 1
-            logging.info(f"Webhook cleanup attempt {attempt}/{max_attempts}")
-            
-            # Create a new bot instance for cleanup to avoid conflicts
-            cleanup_bot = Bot(BOT_TOKEN)
-            
-            # First check if webhook exists
-            webhook_info = cleanup_bot.get_webhook_info()
-            if not webhook_info.url:
-                logging.info("No webhook found, skipping cleanup")
-                return
-                
-            # Use drop_pending_updates=True to ensure clean state
-            cleanup_bot.delete_webhook(drop_pending_updates=True)
-            logging.info("Cleaned up existing webhook")
-            
-            # Verify webhook was deleted
-            time.sleep(3)  # Wait before verification
-            webhook_info = cleanup_bot.get_webhook_info()
-            if not webhook_info.url:
-                logging.info("Webhook deletion verified")
-                break
-            else:
-                logging.warning("Webhook still exists after deletion attempt")
-            
-            # Add a longer delay to ensure webhook deletion is processed
-            time.sleep(5)
-            
-            # Clean up the bot instance
-            del cleanup_bot
-            
-        except Exception as e:
-            logging.error(f"Error cleaning up webhook (attempt {attempt}/{max_attempts}): {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-            time.sleep(3)  # Wait before retrying
-    
-    if attempt >= max_attempts:
-        logging.warning("Maximum webhook cleanup attempts reached")
-        # Try one last time with a different approach
-        try:
-            final_bot = Bot(BOT_TOKEN)
-            final_bot.delete_webhook(drop_pending_updates=True)
-            logging.info("Final webhook cleanup attempt completed")
-            del final_bot
-        except Exception as final_error:
-            logging.error(f"Final webhook cleanup attempt failed: {final_error}")
-            pass
-
-
-def cleanup_sockets():
-    """Clean up any existing socket connections."""
-    try:
-        # Close the lock socket if it exists
-        global bot_lock_socket
-        if bot_lock_socket:
-            try:
-                # Check if socket is still valid before closing
-                if hasattr(bot_lock_socket, 'fileno') and bot_lock_socket.fileno() >= 0:
-                    bot_lock_socket.close()
-                    logging.info("Closed lock socket")
-                else:
-                    logging.info("Lock socket already closed or invalid")
-                # Set to None to prevent further usage
-                bot_lock_socket = None
-            except OSError as e:
-                if e.errno == errno.EBADF:  # Bad file descriptor
-                    logging.info("Socket already closed or invalid")
-                    bot_lock_socket = None
-                else:
-                    logging.error(f"Error closing lock socket: {e}")
-            except Exception as e:
-                logging.error(f"Error closing lock socket: {e}")
-        
-        # Close any other sockets we might have created
-        if hasattr(socket, '_socketobject'):
-            for sock in socket._socketobject._instances:
-                try:
-                    if hasattr(sock, 'fileno') and sock.fileno() >= 0:
-                        sock.close()
-                except:
-                    pass
-    except Exception as e:
-        logging.error(f"Error during socket cleanup: {e}")
+# Flag to track if shutdown is in progress
+SHUTDOWN_IN_PROGRESS = False
 
 def create_socket_lock():
     """Create a socket-based lock to ensure only one instance of the bot runs."""
+    lock_port = 10001
+    
     # First, try to kill any existing instances
-    kill_existing_instances()
-    logging.info("Waiting for existing processes to terminate")
-    time.sleep(10)  # Longer wait for processes to be killed
+    try:
+        kill_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        kill_socket.settimeout(1)
+        kill_socket.connect(('localhost', lock_port))
+        kill_socket.send(b'kill')
+        kill_socket.close()
+        time.sleep(5)
+    except:
+        pass
     
     # Create a new socket for locking
-    lock_socket = None
-    max_attempts = 5  # Increased max attempts
-    attempt = 0
-    
-    while attempt < max_attempts:
-        attempt += 1
-        logging.info(f"Socket lock attempt {attempt}/{max_attempts}")
-        
-        try:
-            # Close any existing socket first
-            if lock_socket:
-                try:
-                    if hasattr(lock_socket, 'fileno') and lock_socket.fileno() >= 0:
-                        lock_socket.close()
-                        logging.info("Closed previous socket attempt")
-                except Exception as close_error:
-                    logging.error(f"Error closing previous socket: {close_error}")
-            
-            # Create a new socket for locking
-            lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            
-            # Set socket options for better exclusivity
-            lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
-                lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-            
-            # Keep socket in blocking mode for reliability
-            lock_socket.setblocking(True)
-            
-            # Try to bind to the lock port
-            try:
-                # Try to bind with a timeout to avoid hanging
-                bind_thread = threading.Thread(target=lambda: lock_socket.bind(('localhost', LOCK_PORT)))
-                bind_thread.daemon = True
-                bind_thread.start()
-                bind_thread.join(5)  # Wait up to 5 seconds for binding
-                
-                if bind_thread.is_alive():
-                    logging.error("Binding operation timed out")
-                    # Force close the socket
-                    try:
-                        lock_socket.close()
-                    except:
-                        pass
-                    lock_socket = None
-                    raise socket.error("Binding operation timed out")
-                
-                logging.info(f"Successfully bound to port {LOCK_PORT}")
-            except socket.error as bind_error:
-                logging.error(f"Failed to bind to lock port: {bind_error}")
-                # Port is already in use, another instance is running
-                if lock_socket:
-                    try:
-                        lock_socket.close()
-                    except:
-                        pass
-                    lock_socket = None
-                
-                # If this is our last attempt, give up
-                if attempt >= max_attempts:
-                    logging.error("Maximum socket lock attempts reached, giving up")
-                    return None
-                    
-                # Otherwise wait and try again with exponential backoff
-                wait_time = min(5 * (2 ** (attempt - 1)) + random.uniform(1, 5), 60)  # Cap at 60 seconds
-                logging.info(f"Waiting {wait_time:.1f} seconds before next attempt")
-                time.sleep(wait_time)
-                continue
-            
-            # Set a reasonable timeout that won't cause issues with heartbeats
-            lock_socket.settimeout(30)  # Shorter timeout for better responsiveness
-            
-            # Verify socket is valid before proceeding
-            if not hasattr(lock_socket, 'fileno') or lock_socket.fileno() < 0:
-                logging.error("Created socket has invalid file descriptor")
-                return None
-            
-            # Create lock file with PID
-            try:
-                with open(LOCK_FILE, 'w') as f:
-                    f.write(str(os.getpid()))
-                logging.info(f"Created lock file with PID {os.getpid()}")
-            except Exception as file_error:
-                logging.error(f"Error creating lock file: {file_error}")
-                # Continue anyway, socket lock is still valid
-            
-            # Register cleanup function
-            atexit.register(cleanup_lock_file)
-            
-            # Start a more robust heartbeat mechanism
-            def keep_socket_alive(socket_ref):
-                # Use a local reference to the socket to prevent issues with global variable changes
-                local_socket = socket_ref
-                running = True
-                heartbeat_count = 0
-                
-                while running:
-                    try:
-                        # Check if socket is still valid before sending heartbeat
-                        if local_socket is None or not hasattr(local_socket, 'fileno') or local_socket.fileno() < 0:
-                            logging.warning("Socket appears to be closed or invalid, stopping heartbeat")
-                            break
-                        
-                        # Send heartbeat
-                        heartbeat_count += 1
-                        local_socket.sendto(f"heartbeat-{heartbeat_count}".encode(), ('localhost', LOCK_PORT))
-                        
-                        # Log occasional heartbeat status
-                        if heartbeat_count % 20 == 0:  # Log every ~60 seconds
-                            logging.info(f"Socket heartbeat still active (count: {heartbeat_count})")
-                            
-                        time.sleep(3)  # More frequent heartbeats
-                    except OSError as e:
-                        # Handle specific socket errors
-                        if e.errno == errno.EBADF:  # Bad file descriptor
-                            logging.warning("Socket descriptor is no longer valid, stopping heartbeat")
-                        else:
-                            logging.error(f"Socket error in heartbeat: {e}")
-                        break
-                    except Exception as e:
-                        logging.error(f"Heartbeat error: {e}")
-                        break
-            
-            heartbeat_thread = threading.Thread(target=keep_socket_alive, args=(lock_socket,), daemon=True)
-            heartbeat_thread.start()
-            
-            logging.info(f"Successfully acquired socket lock on port {LOCK_PORT}")
-            return lock_socket
-                
-        except Exception as e:
-            logging.error(f"Failed to acquire socket lock: {e}")
-            try:
-                if lock_socket:
-                    lock_socket.close()
-            except:
-                pass
-                
-            # If this is our last attempt, give up
-            if attempt >= max_attempts:
-                logging.error("Maximum socket lock attempts reached, giving up")
-                return None
-                
-            # Otherwise wait and try again
-            wait_time = 3 * attempt
-            logging.info(f"Waiting {wait_time} seconds before next attempt")
-            time.sleep(wait_time)
-
-def graceful_shutdown(updater=None, lock_socket=None):
-    """Perform a graceful shutdown of the bot with enhanced cleanup."""
-    global SHUTDOWN_IN_PROGRESS, bot_lock_socket, BOT_INSTANCE_LOCK, bot_updater
-    
-    # Use a timeout to prevent hanging during shutdown
-    shutdown_timeout = threading.Timer(30, lambda: os._exit(1))
-    shutdown_timeout.daemon = True
+    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
     try:
-        if SHUTDOWN_IN_PROGRESS:
-            logging.info("Shutdown already in progress, skipping duplicate shutdown")
-            return
-            
-        SHUTDOWN_IN_PROGRESS = True
-        logging.info("Starting graceful shutdown...")
+        # Set socket options for better exclusivity
+        lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         
-        # Start the timeout timer
-        shutdown_timeout.start()
+        # Set socket to non-blocking mode
+        lock_socket.setblocking(False)
         
-        # First stop the updater to prevent further conflicts
+        # Try to bind to the lock port
+        lock_socket.bind(('localhost', lock_port))
+        
+        # Set a longer timeout
+        lock_socket.settimeout(60)
+        
+        # Start a more robust heartbeat mechanism
+        def keep_socket_alive():
+            while True:
+                try:
+                    lock_socket.sendto(b'heartbeat', ('localhost', lock_port))
+                    time.sleep(5)  # More frequent heartbeats
+                except:
+                    break
+        
+        heartbeat_thread = threading.Thread(target=keep_socket_alive, daemon=True)
+        heartbeat_thread.start()
+        
+        logging.info("Successfully acquired socket lock")
+        return lock_socket
+    except socket.error as e:
+        logging.error(f"Failed to acquire socket lock: {e}")
+        try:
+            lock_socket.close()
+        except:
+            pass
+        return None
+
+def graceful_shutdown(updater=None, lock_socket=None):
+    """Perform a graceful shutdown of the bot."""
+    global SHUTDOWN_IN_PROGRESS
+    
+    if SHUTDOWN_IN_PROGRESS:
+        return
+        
+    SHUTDOWN_IN_PROGRESS = True
+    logging.info("Starting graceful shutdown...")
+    
+    try:
+        # First, try to delete webhook
+        if updater and hasattr(updater, 'bot'):
+            try:
+                updater.bot.delete_webhook(drop_pending_updates=True)
+                logging.info("Deleted webhook during shutdown")
+            except:
+                pass
+        
+        # Stop the updater
         if updater:
             try:
-                # Reset update fetcher state first
-                if hasattr(updater, 'dispatcher') and hasattr(updater.dispatcher, '_update_fetcher'):
-                    if hasattr(updater.dispatcher._update_fetcher, '_last_update_id'):
-                        updater.dispatcher._update_fetcher._last_update_id = 0
-                        logging.info("Reset update fetcher ID")
-                    if hasattr(updater.dispatcher._update_fetcher, 'running'):
-                        updater.dispatcher._update_fetcher.running = False
-                        logging.info("Stopped update fetcher")
-                
-                # Stop the updater with a timeout to prevent hanging
-                stop_thread = threading.Thread(target=updater.stop)
-                stop_thread.daemon = True
-                stop_thread.start()
-                stop_thread.join(10)  # Wait up to 10 seconds for clean stop
-                
-                if stop_thread.is_alive():
-                    logging.warning("Updater stop operation timed out")
-                else:
-                    logging.info("Stopped updater successfully")
-            except Exception as e:
-                logging.error(f"Error stopping updater: {e}")
-        
-        # Delete webhook after stopping updater
-        try:
-            # Create a new bot instance for webhook deletion to avoid conflicts
-            cleanup_bot = Bot(BOT_TOKEN)
-            webhook_info = cleanup_bot.get_webhook_info()
-            
-            if webhook_info.url:
-                # Use a thread with timeout for webhook deletion
-                def delete_webhook():
-                    try:
-                        cleanup_bot.delete_webhook(drop_pending_updates=True)
-                        logging.info("Deleted webhook during shutdown")
-                    except Exception as webhook_error:
-                        logging.error(f"Error in webhook deletion thread: {webhook_error}")
-                
-                webhook_thread = threading.Thread(target=delete_webhook)
-                webhook_thread.daemon = True
-                webhook_thread.start()
-                webhook_thread.join(10)  # Wait up to 10 seconds for webhook deletion
-                
-                if webhook_thread.is_alive():
-                    logging.warning("Webhook deletion timed out")
-                
-                # Add a delay to ensure webhook deletion is processed
-                time.sleep(2)
-            else:
-                logging.info("No webhook found during shutdown")
-                
-            # Clean up the bot instance
-            del cleanup_bot
-        except Exception as e:
-            logging.error(f"Error handling webhook during shutdown: {e}")
+                updater.stop()
+                logging.info("Stopped updater")
+            except:
+                pass
         
         # Release thread lock
         if BOT_INSTANCE_LOCK.locked():
-            try:
-                BOT_INSTANCE_LOCK.release()
-                logging.info("Released thread lock")
-            except Exception as e:
-                logging.error(f"Error releasing thread lock: {e}")
+            BOT_INSTANCE_LOCK.release()
+            logging.info("Released thread lock")
         
         # Close socket lock
         if lock_socket:
             try:
-                # Check if socket is still valid before closing
-                if hasattr(lock_socket, 'fileno') and lock_socket.fileno() >= 0:
-                    lock_socket.close()
-                    logging.info("Closed socket lock")
-                else:
-                    logging.info("Socket lock already closed or invalid")
-                # Set global variable to None to prevent further usage
-                bot_lock_socket = None
-            except OSError as e:
-                if e.errno == errno.EBADF:  # Bad file descriptor
-                    logging.info("Socket lock already closed or invalid")
-                else:
-                    logging.error(f"Error closing socket lock: {e}")
-            except Exception as e:
-                logging.error(f"Error closing socket lock: {e}")
-        
-        # Clean up lock file
-        cleanup_lock_file()
-        
-        # Release file lock
-        release_file_lock()
-        
-        # Remove PID file
-        if os.path.exists(PID_FILE):
-            try:
-                os.remove(PID_FILE)
-                logging.info("Removed PID file during shutdown")
-            except Exception as pid_error:
-                logging.error(f"Error removing PID file: {pid_error}")
+                lock_socket.close()
+                logging.info("Closed socket lock")
+            except:
+                pass
         
         # Additional cleanup
         try:
             # Force cleanup of any remaining sockets
-            for sock in [s for s in socket._socketobject._instances if hasattr(s, 'fileno') and s.fileno() > 0]:
+            for sock in [s for s in socket.socket() if s.fileno() > 0]:
                 try:
                     sock.close()
-                    logging.debug("Closed additional socket")
                 except:
                     pass
-        except Exception as e:
-            logging.error(f"Error during additional socket cleanup: {e}")
-            
-        # Kill any remaining bot processes as a last resort
-        try:
-            kill_existing_instances()
-        except Exception as kill_error:
-            logging.error(f"Error killing existing instances during shutdown: {kill_error}")
+        except:
+            pass
             
     except Exception as e:
         logging.error(f"Error during shutdown: {e}")
-        import traceback
-        logging.error(traceback.format_exc())
     finally:
-        # Cancel the timeout timer if it's still running
-        if shutdown_timeout.is_alive():
-            shutdown_timeout.cancel()
-        
         SHUTDOWN_IN_PROGRESS = False
         logging.info("Shutdown complete")
-        
-        # Set global variables to None to prevent further usage
-        bot_updater = None
 
 def error_handler(update, context):
     """Handle errors in the dispatcher with improved conflict resolution."""
     try:
         if isinstance(context.error, Conflict):
             logging.warning("Conflict error: Another instance of the bot is already running")
+            # Implement a more sophisticated recovery strategy
+            # First, log detailed information about the conflict
             logging.info(f"Detailed conflict error: {context.error}")
             logging.info("Attempting to resolve conflict situation...")
             
             # Check if we should terminate this instance
-            global BOT_INSTANCE_LOCK, bot_updater, bot_lock_socket, SHUTDOWN_IN_PROGRESS
-            
-            # Prevent multiple shutdown attempts
-            if SHUTDOWN_IN_PROGRESS:
-                logging.info("Shutdown already in progress, skipping additional conflict resolution")
-                return
-                
-            SHUTDOWN_IN_PROGRESS = True
-            
-            # Check if we hold the thread lock - if not, we should terminate
+            global BOT_INSTANCE_LOCK
             if not BOT_INSTANCE_LOCK.locked():
                 logging.warning("Thread lock not held by this instance - this instance should terminate")
-            else:
-                logging.warning("Thread lock held by this instance but conflict detected - possible race condition")
-                # Release the lock since we're going to terminate anyway
-                try:
-                    BOT_INSTANCE_LOCK.release()
-                    logging.info("Released thread lock during conflict resolution")
-                except Exception as lock_error:
-                    logging.error(f"Error releasing thread lock: {lock_error}")
-                
-            # Always terminate this instance if we encounter a conflict
-            logging.warning("Conflict detected - terminating this instance")
-            
-            # More aggressive cleanup
-            try:
-                # First stop the global updater if it exists
-                if bot_updater:
-                    try:
-                        bot_updater.stop()
-                        logging.info("Stopped global updater during conflict resolution")
-                    except Exception as updater_error:
-                        logging.error(f"Error stopping global updater: {updater_error}")
-                
-                # Also try to stop the context's updater if different
-                if hasattr(context.dispatcher, 'updater') and context.dispatcher.updater:
-                    try:
-                        if bot_updater is None or context.dispatcher.updater != bot_updater:  # Only if different from global
-                            context.dispatcher.updater.stop()
-                            logging.info("Stopped context updater during conflict resolution")
-                    except Exception as updater_error:
-                        logging.error(f"Error stopping context updater: {updater_error}")
-                
-                # Delete webhook with drop_pending_updates to ensure clean state
-                if hasattr(context, 'bot'):
-                    try:
-                        webhook_info = context.bot.get_webhook_info()
-                        if webhook_info.url:  # Only delete if webhook exists
-                            context.bot.delete_webhook(drop_pending_updates=True)
-                            logging.info("Deleted webhook during conflict resolution")
-                            # Wait for webhook deletion to process
-                            time.sleep(3)
-                    except Exception as webhook_error:
-                        logging.error(f"Error deleting webhook: {webhook_error}")
-                
-                # Reset update fetcher state
-                if hasattr(context.dispatcher, '_update_fetcher'):
-                    if hasattr(context.dispatcher._update_fetcher, '_last_update_id'):
-                        context.dispatcher._update_fetcher._last_update_id = 0
-                        logging.info("Reset update ID to 0")
-                    
-                    # Stop the update fetcher if it's running
-                    if hasattr(context.dispatcher._update_fetcher, 'running'):
-                        context.dispatcher._update_fetcher.running = False
-                        logging.info("Stopped update fetcher")
-                
-                # Release thread lock if we're still holding it somehow
-                if BOT_INSTANCE_LOCK.locked():
-                    try:
-                        BOT_INSTANCE_LOCK.release()
-                        logging.info("Released thread lock during conflict resolution")
-                    except Exception as lock_error:
-                        logging.error(f"Error releasing thread lock: {lock_error}")
-                
-                # Close socket lock if it exists
-                if bot_lock_socket:
-                    try:
-                        if hasattr(bot_lock_socket, 'fileno') and bot_lock_socket.fileno() >= 0:
-                            bot_lock_socket.close()
-                            logging.info("Closed socket lock during conflict resolution")
-                        bot_lock_socket = None
-                    except Exception as socket_error:
-                        logging.error(f"Error closing socket lock: {socket_error}")
-                
-                # Perform full cleanup
-                cleanup_resources()
-                
-                # Perform graceful shutdown
-                graceful_shutdown(bot_updater, bot_lock_socket)
-                
-                # Wait to ensure cleanup is complete
-                time.sleep(5)
-                
                 # Force exit this instance
-                logging.info("Exiting due to conflict resolution")
-                SHUTDOWN_IN_PROGRESS = False
-                os._exit(1)  # Use os._exit for more forceful termination
+                return
                 
+            # Wait longer to ensure the other instance has a chance to stabilize
+            recovery_wait = 30  # Increased wait time for better recovery chances
+            logging.info(f"Waiting {recovery_wait} seconds before attempting recovery")
+            time.sleep(recovery_wait)
+            
+            try:
+                # More thorough cleanup process
+                if hasattr(context, 'bot') and hasattr(context.bot, 'get_updates'):
+                    # First, delete any webhook to ensure we're in polling mode
+                    context.bot.delete_webhook(drop_pending_updates=True)
+                    logging.info("Deleted webhook and dropped pending updates")
+                    
+                    # Reset the update fetcher state completely
+                    if hasattr(context.dispatcher, '_update_fetcher'):
+                        if hasattr(context.dispatcher._update_fetcher, '_last_update_id'):
+                            # Reset to 0 to force a fresh start
+                            context.dispatcher._update_fetcher._last_update_id = 0
+                            logging.info("Reset update ID to 0")
+                        
+                        # Try to stop the update fetcher if it's running
+                        if hasattr(context.dispatcher._update_fetcher, 'running') and context.dispatcher._update_fetcher.running:
+                            logging.info("Attempting to stop the update fetcher")
+                            context.dispatcher._update_fetcher.running = False
+                            
+                            # Force a complete restart of the update fetcher
+                            if hasattr(context.dispatcher, 'start_polling'):
+                                try:
+                                    # Stop and restart polling with clean state
+                                    context.dispatcher.stop()
+                                    time.sleep(5)  # Wait for complete stop
+                                    context.dispatcher.start_polling(drop_pending_updates=True)
+                                    logging.info("Restarted polling with clean state")
+                                except Exception as restart_error:
+                                    logging.error(f"Failed to restart polling: {restart_error}")
+                    
+                    # Add a delay to ensure changes take effect
+                    time.sleep(5)
+                    logging.info("Completed enhanced conflict recovery process")
+                else:
+                    logging.warning("Could not access bot or get_updates method for recovery")
             except Exception as e:
                 logging.error(f"Failed to recover from conflict: {e}")
+                # Log the full traceback for better debugging
                 import traceback
                 logging.error(traceback.format_exc())
-                # Still exit even if cleanup failed
-                SHUTDOWN_IN_PROGRESS = False
-                os._exit(1)  # Use os._exit for more forceful termination
+                # Signal that this instance should terminate
+                logging.critical("Recovery failed - this instance should terminate")
                 
+                # Try to release resources before terminating
+                try:
+                    if hasattr(context, 'dispatcher') and hasattr(context.dispatcher, 'stop'):
+                        context.dispatcher.stop()
+                        logging.info("Stopped dispatcher during failed recovery")
+                except Exception as cleanup_error:
+                    logging.error(f"Error during cleanup: {cleanup_error}")
         elif isinstance(context.error, NetworkError):
             logging.error(f"Network error: {context.error}. Waiting before retry.")
-            backoff_time = 25 + (5 * random.random())
+            # Implement exponential backoff for network errors
+            backoff_time = 25 + (5 * random.random())  # Base time plus some randomization
             logging.info(f"Backing off for {backoff_time:.1f} seconds")
-            time.sleep(backoff_time)
+            time.sleep(backoff_time)  # Increased wait time for network errors
         else:
+            # Get update information safely
             update_str = str(update) if update else "None"
             logging.error(f"Update {update_str} caused error: {context.error}")
+            
+            # For other errors, log more details for debugging
             import traceback
             logging.error(f"Error traceback: {traceback.format_exc()}")
     except Exception as e:
         logging.error(f"Error in error handler: {e}")
+        # Log the full traceback for better debugging
         import traceback
         logging.error(traceback.format_exc())
+        
+        # Try to recover from error in error handler
+        try:
+            if hasattr(context, 'dispatcher') and hasattr(context.dispatcher, 'update_queue'):
+                # Clear the update queue to prevent processing problematic updates
+                while not context.dispatcher.update_queue.empty():
+                    context.dispatcher.update_queue.get(False)
+                logging.info("Cleared update queue after error in error handler")
+        except Exception as recovery_error:
+            logging.error(f"Failed to recover from error in error handler: {recovery_error}")
 
 def start(update: Update, context) -> None:
     """Send a message when the command /start is issued."""
@@ -1321,7 +931,7 @@ def handle_conversation(update: Update, context) -> None:
             f"Please enter the deposit amount for {bank_name}:"
         )
         return
-    
+
     elif state == 'waiting_for_bank_name':
         # User is entering a custom bank name for this transaction
         bank_name = text.strip()
@@ -1342,6 +952,60 @@ def handle_conversation(update: Update, context) -> None:
             f"Please enter the deposit amount for {bank_name}:"
         )
         return
+    
+    elif state == 'waiting_for_deposit_amount':
+        # Try to parse the deposit amount
+        try:
+            # Remove any currency symbols and convert to float
+            numeric_str = re.sub(r'[€$£¥]', '', text)
+            # Handle both decimal separators
+            if ',' in numeric_str and '.' not in numeric_str:
+                numeric_str = numeric_str.replace(',', '.')
+            
+            deposit_amount = float(numeric_str)
+            
+            # Get the current bank
+            current_bank = user_states[user_id]['current_bank']
+            
+            # Initialize bank_deposits list if it doesn't exist
+            if 'bank_deposits' not in user_states[user_id]:
+                user_states[user_id]['bank_deposits'] = []
+            
+            # Add to bank deposits list
+            user_states[user_id]['bank_deposits'].append({
+                'bank': current_bank,
+                'amount': deposit_amount
+            })
+            
+            # Update running total of deposits
+            user_states[user_id]['total_deposits'] += deposit_amount
+            
+            # Calculate current balance
+            current_balance = user_states[user_id]['total_deposits'] - user_states[user_id].get('total_paid', 0)
+            
+            # Ask if user wants to add another bank deposit
+            keyboard = [
+                [InlineKeyboardButton("Add Another Bank Deposit", callback_data='add_another_bank')],
+                [InlineKeyboardButton("Finish and Export CSV", callback_data='finish_csv_export')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Show summary of current deposits with improved formatting
+            deposits_summary = "\n".join([f"• <b>{d['bank']}</b>: {d['amount']:.2f}" for d in user_states[user_id]['bank_deposits']])
+            
+            update.message.reply_text(
+                f"✅ <b>Added deposit of {deposit_amount:.2f} to {current_bank}</b>\n\n"
+                f"<b>Current deposits:</b>\n{deposits_summary}\n\n"
+                f"<b>Running total:</b> {user_states[user_id]['total_deposits']:.2f}\n"
+                f"<b>Current balance:</b> {current_balance:.2f}\n\n"
+                f"<b>Would you like to add another bank deposit or finish?</b>",
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+        except ValueError:
+            update.message.reply_text(
+                "❗ Invalid amount. Please enter a valid number for the deposit amount:"
+            )
     
     elif state == 'waiting_for_remaining_balance':
         # Try to parse the remaining balance
@@ -1639,13 +1303,16 @@ def export_simple_csv(update: Update, context) -> None:
         )
 
 def process_export_csv(update: Update, context, use_manual_input=False) -> None:
-    """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Remaining Balance."""
+    """Export the results as a CSV file with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Remaining Balance.
+    Maintains a running balance by using the previous day's remaining balance as today's starting balance.
+    Supports multiple bank deposits on the same day and provides detailed summaries."""
     # Determine if this is called from a callback query or directly
     if hasattr(update, 'callback_query') and update.callback_query is not None:
         query = update.callback_query
         user_id = query.from_user.id
         message = query.message
     else:
+        # Handle the case when update.effective_user might be None
         if hasattr(update, 'effective_user') and update.effective_user is not None:
             user_id = update.effective_user.id
             message = update.message
@@ -1653,6 +1320,7 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
             user_id = update.message.from_user.id
             message = update.message
         else:
+            # Fallback for when we can't determine the user_id
             logger.error("Could not determine user_id from update object")
             return
 
@@ -1681,16 +1349,33 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     
     # Use manual input if requested
     if use_manual_input and user_id in user_states:
+        # Get the manually entered remaining balance
         manual_remaining_balance = user_states[user_id].get('remaining_balance')
         csv_path = user_states[user_id].get('csv_path')
         
+        # Get multiple bank deposits if available
         if 'bank_deposits' in user_states[user_id] and user_states[user_id]['bank_deposits']:
             bank_deposits = user_states[user_id]['bank_deposits']
             
+            # Add all bank deposits to amounts list for processing
             for deposit in bank_deposits:
                 deposit_amount = deposit['amount']
+                # Convert to string with appropriate format
                 deposit_str = str(int(deposit_amount) if deposit_amount.is_integer() else deposit_amount)
                 amounts.append(deposit_str)
+        else:
+            # Fallback to old single deposit method if no bank_deposits list
+            deposit_amount = user_states[user_id].get('deposit_amount')
+            bank_name = user_states[user_id].get('bank_name')
+            
+            if deposit_amount is not None and bank_name is not None:
+                # Convert to string with appropriate format
+                deposit_str = str(int(deposit_amount) if deposit_amount.is_integer() else deposit_amount)
+                amounts.append(deposit_str)
+                bank_deposits.append({
+                    'bank': bank_name,
+                    'amount': deposit_amount
+                })
     else:
         csv_path = None
         manual_remaining_balance = None
@@ -1698,6 +1383,7 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     # Variable to store previous day's balance
     previous_balance = 0.0
     
+    # If user manually entered a remaining balance, use it instead of reading from file
     if manual_remaining_balance is not None:
         previous_balance = manual_remaining_balance
         logger.info(f"Using manually entered remaining balance: {previous_balance}")
@@ -1706,137 +1392,300 @@ def process_export_csv(update: Update, context, use_manual_input=False) -> None:
     if not use_manual_input or not amounts:
         for message_data in user_messages[user_id]:
             message_text = message_data['text']
+
+            # Find all matches in the message
             matches = re.findall(pattern, message_text)
 
             for match in matches:
                 currency, original_number, processed_number, value, has_decimal = extract_number_value(match, decimal_separator, message_text)
+
+                # Format the extracted value
                 extracted_value = f"{currency}{processed_number}" if currency and preferences['include_currency'] else processed_number
 
+                # Add to appropriate category
                 if value > AMOUNT_THRESHOLD:
                     amounts.append(extracted_value)
                 else:
                     charges.append(extracted_value)
 
     if not amounts and not charges:
-        message.reply_text("❗ I couldn't find any numbers in your collected messages.")
+        message.reply_text(
+            f"❗ I couldn't find any numbers in your collected messages."
+        )
         return
 
     # Calculate the total deposit (sum of amounts)
     total_deposit = 0
     
+    # First add the previous balance if it exists and we're not using it as a special entry
     if previous_balance > 0 and not (use_manual_input and 'bank_deposits' in user_states[user_id] and 
                                    any(d['bank'] == 'Previous Balance' for d in bank_deposits)):
         total_deposit += previous_balance
         
+    # Then add all the amounts
     for amount_str in amounts:
+        # Remove any currency symbol
         numeric_str = re.sub(r'[€$£¥]', '', amount_str)
+        # Replace comma with period if needed
         if decimal_separator == ',':
             numeric_str = numeric_str.replace(',', '.')
+        # Convert to float and add to sum
         try:
             total_deposit += float(numeric_str)
         except ValueError:
+            # Skip if conversion fails
             pass
     
     # Calculate the total paid (sum of charges)
     total_paid = 0
     for charge_str in charges:
+        # Remove any currency symbol
         numeric_str = re.sub(r'[€$£¥]', '', charge_str)
+        # Replace comma with period if needed
         if decimal_separator == ',':
             numeric_str = numeric_str.replace(',', '.')
+        # Convert to float and add to sum
         try:
             total_paid += float(numeric_str)
         except ValueError:
+            # Skip if conversion fails
             pass
     
     # Calculate the balance (total deposit - total paid)
     balance = total_deposit - total_paid
+    
+    # Format the totals to match the screenshot format - always show 2 decimal places
+    total_deposit_str = f"{total_deposit:.2f}"
+    total_paid_str = f"{total_paid:.2f}"
+    balance_str = f"{balance:.2f}"
 
     # Determine the CSV file path
     if csv_path and os.path.isfile(csv_path):
         filename = csv_path
         file_exists = True
+        # Store the path for future use
         user_csv_files[user_id] = csv_path
     else:
+        # Create a new CSV file with the requested format using current month
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        current_month = datetime.now().strftime('%B_%Y')
+        current_month = datetime.now().strftime('%B_%Y')  # e.g., "March_2024"
         filename = os.path.join(current_dir, f"decimal_stripper_export_{current_month}.csv")
         file_exists = False
+        # Store the path for future use
         user_csv_files[user_id] = filename
 
     try:
         if file_exists:
+            # Read existing file to get current totals and previous day's balance
+            existing_totals = {'total_deposit': 0, 'total_paid': 0, 'balance': 0}
+            try:
+                with open(filename, 'r', newline='', encoding='utf-8') as csvfile:
+                    reader = csv.reader(csvfile)
+                    rows = list(reader)
+                    
+                    # Check if file has the expected format
+                    if len(rows) > 0 and 'Date' in rows[0] and 'Total Deposit' in rows[0]:
+                        # Find the totals row (usually the last non-empty row)
+                        for row in reversed(rows):
+                            if row and row[4] and row[5] and row[6]:  # Total columns have values
+                                try:
+                                    existing_totals['total_deposit'] = float(row[4])
+                                    existing_totals['total_paid'] = float(row[5])
+                                    existing_totals['balance'] = float(row[6])
+                                    previous_balance = existing_totals['balance']  # Set previous day's balance
+                                    break
+                                except ValueError:
+                                    pass
+            except Exception as e:
+                logger.error(f"Error reading existing CSV: {e}")
+                # Continue with new file if reading fails
+                file_exists = False
+            
+            # Open file in append mode
             mode = 'a'
+            
+            # If we have a previous balance, handle it appropriately
+            if previous_balance > 0:
+                if use_manual_input:
+                    # If user manually entered a remaining balance, inform them
+                    if user_id in user_states and user_states[user_id].get('remaining_balance') is not None:
+                        message.reply_text(f"Note: Using your manually entered remaining balance of {previous_balance}. This will be included in your total calculations.")
+                    else:
+                        # Using previous balance from file
+                        message.reply_text(f"Note: Previous day's remaining balance was {previous_balance}. This will be included in your total calculations.")
+                else:
+                    # Add previous balance as a special entry
+                    bank_deposits.insert(0, {
+                        'bank': "Previous Balance",
+                        'amount': previous_balance
+                    })
+            
+            # Calculate new totals
+            # Always include previous balance in calculations
+            total_deposit += existing_totals['total_deposit']
+            total_paid += existing_totals['total_paid']
+            
+            # Calculate the final balance
+            balance = total_deposit - total_paid
+            
+            # Log the balance calculation for debugging
+            logger.debug(f"Balance calculation: {total_deposit} - {total_paid} = {balance}")
+            logger.debug(f"Previous balance: {previous_balance}")
+            
+            # Inform user about the running balance
+            if previous_balance > 0:
+                message.reply_text(f"Your running balance includes the previous day's balance of {previous_balance}.")
+
         else:
+            # Create new file
             mode = 'w'
         
         with open(filename, mode, newline='', encoding='utf-8') as csvfile:
+            # Create writer
             writer = csv.writer(csvfile)
             
+            # Write header if creating a new file
             if not file_exists:
-                fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Remaining Balance']
+                fieldnames = ['Date', 'Deposit Amount', 'Bank Name', 'Paid To Host', 'Total Deposit', 'Total Paid', 'Remaining Balance']
                 writer.writerow(fieldnames)
             
-            # Write bank deposits first
+            # If we have manually entered bank deposits, write each one with improved formatting
             if bank_deposits:
+                # Sort deposits to ensure Previous Balance comes first if it exists
                 sorted_deposits = sorted(bank_deposits, key=lambda x: 0 if x['bank'] == 'Previous Balance' else 1)
                 
                 for i, deposit in enumerate(sorted_deposits):
                     bank_name = deposit['bank']
                     deposit_amount = deposit['amount']
+                    
+                    # Format the deposit amount with two decimal places
                     deposit_amount_formatted = f"{float(deposit_amount):.2f}"
                     
+                    # Write the deposit information
+                    # Only include date in the first row
                     if i == 0:
-                        deposit_row = [current_date, deposit_amount_formatted, bank_name, '', '']
+                        deposit_row = [current_date, deposit_amount_formatted, bank_name, '', '', '', '']
                     else:
-                        deposit_row = ['', deposit_amount_formatted, bank_name, '', '']
+                        deposit_row = ['', deposit_amount_formatted, bank_name, '', '', '', '']
                     writer.writerow(deposit_row)
+            else:
+                # No manually entered deposits, use the first amount from extracted data
+                deposit_amount_formatted = ''
+                if amounts and amounts[0]:
+                    try:
+                        # Remove any currency symbol and convert to float
+                        numeric_str = re.sub(r'[€$£¥]', '', amounts[0])
+                        # Handle both decimal separators
+                        if decimal_separator == ',':
+                            numeric_str = numeric_str.replace(',', '.')
+                        # Always format with 2 decimal places for consistency
+                        deposit_amount_formatted = f"{float(numeric_str):.2f}"
+                    except ValueError:
+                        deposit_amount_formatted = amounts[0]
+                
+                # Write the deposit information in the first row
+                deposit_row = [current_date, deposit_amount_formatted, "Remaining Balance", '', '', '', '']
+                writer.writerow(deposit_row)
             
-            # Write charges with running sums
+            # Write the charges (payments) in subsequent rows with running subtotals
             running_paid = 0.0
-            for i in range(len(charges)):
-                charge_str = charges[i]
-                numeric_str = re.sub(r'[€$£¥]', '', charge_str)
-                if decimal_separator == ',':
-                    numeric_str = numeric_str.replace(',', '.')
-                try:
-                    charge_value = float(numeric_str)
-                    running_paid += charge_value
+            running_total = 0.0
+            
+            # Process amounts and charges together
+            max_rows = max(len(amounts), len(charges))
+            for i in range(max_rows):
+                amount_value = 0.0
+                charge_value = 0.0
+                
+                # Get amount if available
+                if i < len(amounts):
+                    try:
+                        # Remove any currency symbol and convert to float
+                        numeric_str = re.sub(r'[€$£¥]', '', amounts[i])
+                        # Handle both decimal separators
+                        if decimal_separator == ',':
+                            numeric_str = numeric_str.replace(',', '.')
+                        amount_value = float(numeric_str)
+                    except ValueError:
+                        amount_value = 0.0
+                
+                # Get charge if available
+                if i < len(charges):
+                    try:
+                        # Remove any currency symbol and convert to float
+                        numeric_str = re.sub(r'[€$£¥]', '', charges[i])
+                        # Handle both decimal separators
+                        if decimal_separator == ',':
+                            numeric_str = numeric_str.replace(',', '.')
+                        charge_value = float(numeric_str)
+                    except ValueError:
+                        charge_value = 0.0
+                
+                # Calculate row total (amount + charge)
+                row_total = amount_value + charge_value
+                running_total += row_total
+                
+                # Format the values for display
+                amount_formatted = f"{amount_value:.2f}" if amount_value != 0 else ''
+                charge_formatted = f"{charge_value:.2f}" if charge_value != 0 else ''
+                row_total_formatted = f"{row_total:.2f}" if row_total != 0 else ''
+                
+                # Write the row with amount, charge, and their sum
+                if amount_value != 0 or charge_value != 0:
+                    row = ['', amount_formatted, '', charge_formatted, '', '', '']
+                    writer.writerow(row)
                     
-                    # Write the charge row
-                    charge_row = ['', '', '', f"{charge_value:.2f}", '']
-                    writer.writerow(charge_row)
+                    # Write the sum in the next row
+                    if row_total != 0:
+                        sum_row = ['', '', '', f"Row Total: {row_total_formatted}", '', '', '']
+                        writer.writerow(sum_row)
+                
+                # Update running totals
+                running_paid += charge_value
             
-                    # Write the running sum row
-                    sum_row = ['', '', '', f"Running Sum: {running_paid:.2f}", '']
-                    writer.writerow(sum_row)
-                except ValueError:
-                    continue
+            # Add empty row before totals
+            writer.writerow(['', '', '', '', '', '', ''])
             
-            # Write final totals
-            writer.writerow(['', '', '', '', ''])
-            totals_row = ['', 'Total Deposit', '', 'Total Paid', 'Remaining Balance']
+            # Calculate running totals for the bottom row
+            # Format the totals with two decimal places
+            total_deposit_formatted = f"{total_deposit:.2f}"
+            total_paid_formatted = f"{total_paid:.2f}"
+            balance_formatted = f"{balance:.2f}"
+            
+            # Write the totals row at the bottom with proper labels and formatting
+            writer.writerow(['', '', '', '', '', '', ''])  # Empty row for spacing
+            totals_row = ['', 'SUMMARY', '', 'TOTALS:', total_deposit_formatted, total_paid_formatted, balance_formatted]
             writer.writerow(totals_row)
-            values_row = ['', f"{total_deposit:.2f}", '', f"{total_paid:.2f}", f"{balance:.2f}"]
-            writer.writerow(values_row)
+            
+            # Add a footer with additional information
+            writer.writerow(['', '', '', '', '', '', ''])  # Empty row for spacing
+            writer.writerow(['', 'Report generated on:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '', '', '', ''])
+            if bank_deposits:
+                writer.writerow(['', 'Banks included:', ', '.join([deposit['bank'] for deposit in bank_deposits]), '', '', '', ''])
 
-        # Send the file to the user
+        # Send the file to the user with improved caption
         with open(filename, 'rb') as file:
             message.reply_document(
                 document=file,
                 filename=os.path.basename(filename),
-                caption=f"📊 CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Remaining Balance.\n\nThe file includes:\n- Bank deposits with their respective amounts\n- Individual payments with running sums\n- Final totals and remaining balance"
+                caption=f"📊 Enhanced CSV export with the format: Date, Deposit Amount, Bank Name, Paid To Host, Total Deposit, Total Paid, Remaining Balance.\n\nThe file includes:\n- Multiple bank deposits with their respective amounts ({len(bank_deposits)} banks included)\n- Individual payments in the Paid To Host column ({len(charges)} payments recorded)\n- Row totals showing sum of amount and charge for each entry\n- Running totals with automatic calculations\n- Previous balance of {previous_balance:.2f} included in calculations\n- Final remaining balance: {balance:.2f}\n- Improved formatting for better readability"
             )
 
+        # Don't remove the file if it's a user-specified path
         if not csv_path:
             os.remove(filename)
 
+        # Clear the conversation state
         if user_id in user_states:
             del user_states[user_id]
 
     except Exception as e:
         logger.error(f"Error exporting CSV: {e}")
-        message.reply_text(f"❗ Sorry, there was an error creating your CSV file: {str(e)}")
+        message.reply_text(
+            f"❗ Sorry, there was an error creating your CSV file: {str(e)}"
+        )
         
+        # Clear the conversation state on error
         if user_id in user_states:
             del user_states[user_id]
 
@@ -2527,66 +2376,35 @@ def start_add_custom_bank(update: Update, context) -> None:
 
 def main():
     """Start the bot with enhanced instance management."""
-    global bot_updater, bot_lock_socket, BOT_INSTANCE_LOCK, SHUTDOWN_IN_PROGRESS
+    global bot_updater, bot_lock_socket
     
-    # Reset shutdown flag at the beginning
-    SHUTDOWN_IN_PROGRESS = False
+    # First, try to kill any existing instances
+    try:
+        kill_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        kill_socket.settimeout(1)
+        kill_socket.connect(('localhost', 10001))
+        kill_socket.send(b'kill')
+        kill_socket.close()
+        time.sleep(5)
+    except:
+        pass
     
-    # Set up signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Get socket lock
+    lock_socket = create_socket_lock()
+    bot_lock_socket = lock_socket
+    if not lock_socket:
+        logging.error("Failed to acquire socket lock - exiting")
+        return
     
-    # Kill any existing instances first - more aggressive approach
-    logging.info("Killing any existing bot instances")
-    kill_existing_instances()
-    
-    # Clean up any existing resources
-    logging.info("Cleaning up any existing resources")
-    cleanup_resources()
+    # Get thread lock
+    if not BOT_INSTANCE_LOCK.acquire(blocking=False):
+        logging.error("Failed to acquire thread lock - exiting")
+        if lock_socket:
+            lock_socket.close()
+        return
     
     # Wait for resources to be available
-    logging.info("Waiting for resources to be available")
-    time.sleep(10)
-    
-    # Acquire thread lock first to prevent race conditions
-    logging.info("Attempting to acquire thread lock")
-    if not BOT_INSTANCE_LOCK.acquire(timeout=30):  # Reasonable timeout
-        logging.error("Failed to acquire thread lock - exiting")
-        return
-        
-    logging.info("Thread lock acquired successfully")
-    
-    # Try to acquire file lock
-    logging.info("Attempting to acquire file lock")
-    if not acquire_file_lock():
-        logging.error("Failed to acquire file lock - exiting")
-        if BOT_INSTANCE_LOCK.locked():
-            BOT_INSTANCE_LOCK.release()
-        return
-    
-    logging.info("File lock acquired successfully")
-    
-    # Create socket lock as an additional layer of protection
-    logging.info("Attempting to create socket lock")
-    bot_lock_socket = create_socket_lock()
-    if not bot_lock_socket:
-        logging.error("Failed to create socket lock - exiting")
-        release_file_lock()
-        if BOT_INSTANCE_LOCK.locked():
-            BOT_INSTANCE_LOCK.release()
-        return
-    
-    logging.info("Socket lock acquired successfully - all locks in place")
-    logging.info("Bot instance is now the primary instance")
-    
-    # Write PID to file
-    try:
-        with open(PID_FILE, 'w') as f:
-            f.write(str(os.getpid()))
-    except Exception as e:
-        logging.error(f"Error writing PID file: {e}")
-        cleanup_resources()  # Ensure cleanup happens
-        return
+    time.sleep(20)  # Increased wait time
     
     updater = None
     
@@ -2595,8 +2413,20 @@ def main():
             logging.error("Bot token not found")
             return
         
+        # Aggressive cleanup of existing connections
+        try:
+            cleanup_bot = Bot(BOT_TOKEN)
+            cleanup_bot.delete_webhook(drop_pending_updates=True)
+            time.sleep(15)  # Longer wait time
+            del cleanup_bot
+        except:
+            pass
+        
         # Create updater with correct timeout parameters
-        updater = Updater(BOT_TOKEN, request_kwargs={'read_timeout': 30, 'connect_timeout': 30})
+        updater = Updater(BOT_TOKEN, request_kwargs={
+            'read_timeout': 90,
+            'connect_timeout': 120
+        })
         bot_updater = updater
         
         # Register handlers
@@ -2617,218 +2447,80 @@ def main():
         keep_alive()
         
         # Start bot with improved conflict handling
-        max_retries = 10  # Fewer retries but more thorough cleanup between attempts
+        max_retries = 15  # More retries
         retry_count = 0
-        backoff_time = 30  # Longer initial backoff
+        backoff_time = 20  # Longer initial backoff
         
         while retry_count < max_retries:
             try:
-                retry_count += 1
-                logging.info(f"Attempt {retry_count}/{max_retries} to start bot")
+                logging.info(f"Attempt {retry_count + 1}/{max_retries} to start bot")
                 
-                # Thorough cleanup before each attempt
-                cleanup_resources()
-                kill_existing_instances()  # Kill any competing instances
-                time.sleep(20)  # Longer wait between attempts
+                # Aggressive cleanup before each attempt
+                updater.bot.delete_webhook(drop_pending_updates=True)
+                time.sleep(15)
                 
-                # Reset update fetcher state to avoid conflicts
                 if hasattr(dp, '_update_fetcher'):
-                    if hasattr(dp._update_fetcher, '_last_update_id'):
-                        dp._update_fetcher._last_update_id = 0
-                    if hasattr(dp._update_fetcher, 'running'):
-                        dp._update_fetcher.running = False
-                    logging.info("Reset update fetcher state")
+                    dp._update_fetcher._last_update_id = 0
                 
-                # Make sure webhook is deleted before polling
-                try:
-                    # Create a new bot instance for webhook deletion to avoid conflicts
-                    cleanup_bot = Bot(BOT_TOKEN)
-                    webhook_info = cleanup_bot.get_webhook_info()
-                    
-                    if webhook_info.url:
-                        # Use a thread with timeout for webhook deletion
-                        def delete_webhook():
-                            try:
-                                cleanup_bot.delete_webhook(drop_pending_updates=True)
-                                logging.info("Deleted webhook before polling")
-                            except Exception as webhook_error:
-                                logging.error(f"Error in webhook deletion thread: {webhook_error}")
-                        
-                        webhook_thread = threading.Thread(target=delete_webhook)
-                        webhook_thread.daemon = True
-                        webhook_thread.start()
-                        webhook_thread.join(10)  # Wait up to 10 seconds for webhook deletion
-                        
-                        if webhook_thread.is_alive():
-                            logging.warning("Webhook deletion timed out")
-                        
-                        # Add a delay to ensure webhook deletion is processed
-                        time.sleep(10)
-                    else:
-                        logging.info("No webhook found, proceeding with polling")
-                        
-                    # Clean up the bot instance
-                    del cleanup_bot
-                except Exception as e:
-                    logging.error(f"Error checking/deleting webhook: {e}")
+                # Start polling with correct parameters
+                updater.start_polling(
+                    timeout=120,  # Longer timeout
+                    drop_pending_updates=True,
+                    allowed_updates=['message', 'callback_query', 'chat_member'],
+                    bootstrap_retries=5  # More bootstrap retries
+                )
                 
-                # Start polling with correct parameters and in a separate thread with timeout
-                def start_polling():
-                    try:
-                        updater.start_polling(
-                            timeout=60,  # Reasonable timeout
-                            drop_pending_updates=True,
-                            allowed_updates=['message', 'callback_query', 'chat_member'],
-                            bootstrap_retries=3  # Fewer bootstrap retries but more thorough cleanup between attempts
-                        )
-                        logging.info("Polling started successfully")
-                    except Exception as polling_error:
-                        logging.error(f"Error in polling thread: {polling_error}")
-                
-                polling_thread = threading.Thread(target=start_polling)
-                polling_thread.daemon = True
-                polling_thread.start()
-                polling_thread.join(30)  # Wait up to 30 seconds for polling to start
-                
-                if polling_thread.is_alive():
-                    # Thread is still running, which is good - it means polling is active
-                    logging.info("Bot started successfully")
-                    break
-                else:
-                    # Thread completed, which might indicate an error
-                    logging.warning("Polling thread completed unexpectedly, will retry")
-                    time.sleep(5)  # Wait before checking for conflicts
-                    continue
+                logging.info("Bot started successfully")
+                break
                 
             except Conflict as ce:
+                retry_count += 1
                 logging.error(f"Conflict error on attempt {retry_count}/{max_retries}: {ce}")
                 
                 # Aggressive cleanup
                 try:
-                    # First stop the updater if it's running
-                    if updater and hasattr(updater, 'stop'):
-                        try:
-                            # Stop the updater with a timeout to prevent hanging
-                            stop_thread = threading.Thread(target=updater.stop)
-                            stop_thread.daemon = True
-                            stop_thread.start()
-                            stop_thread.join(10)  # Wait up to 10 seconds for clean stop
-                            
-                            if stop_thread.is_alive():
-                                logging.warning("Updater stop operation timed out")
-                            else:
-                                logging.info("Stopped updater during conflict resolution")
-                        except Exception as updater_error:
-                            logging.error(f"Error stopping updater: {updater_error}")
+                    if hasattr(updater, 'bot'):
+                        updater.bot.delete_webhook(drop_pending_updates=True)
                     
-                    # Reset update fetcher state
+                    if hasattr(updater, 'stop'):
+                        updater.stop()
+                    
                     if hasattr(dp, '_update_fetcher'):
                         if hasattr(dp._update_fetcher, 'running'):
                             dp._update_fetcher.running = False
-                        if hasattr(dp._update_fetcher, '_last_update_id'):
                             dp._update_fetcher._last_update_id = 0
-                            logging.info("Reset update fetcher during conflict resolution")
-                    
-                    # Delete webhook to ensure clean state
-                    try:
-                        # Create a new bot instance for webhook deletion
-                        cleanup_bot = Bot(BOT_TOKEN)
-                        webhook_info = cleanup_bot.get_webhook_info()
                         
-                        if webhook_info.url:
-                            cleanup_bot.delete_webhook(drop_pending_updates=True)
-                            logging.info("Deleted webhook during conflict resolution")
-                            time.sleep(5)  # Wait for webhook deletion to process
-                        
-                        # Clean up the bot instance
-                        del cleanup_bot
-                    except Exception as webhook_error:
-                        logging.error(f"Error deleting webhook: {webhook_error}")
-                    
-                    # Release thread lock if we're holding it
-                    if BOT_INSTANCE_LOCK.locked():
+                    # Force cleanup of any remaining sockets
+                    for sock in [s for s in socket.socket() if s.fileno() > 0]:
                         try:
-                            BOT_INSTANCE_LOCK.release()
-                            logging.info("Released thread lock during conflict resolution")
-                        except Exception as lock_error:
-                            logging.error(f"Error releasing thread lock: {lock_error}")
-                    
-                    # Close socket lock if it exists
-                    if bot_lock_socket:
-                        try:
-                            if hasattr(bot_lock_socket, 'fileno') and bot_lock_socket.fileno() >= 0:
-                                bot_lock_socket.close()
-                                logging.info("Closed socket lock during conflict resolution")
-                            bot_lock_socket = None
-                        except Exception as socket_error:
-                            logging.error(f"Error closing socket lock: {socket_error}")
-                    
-                    # Perform full cleanup
-                    cleanup_resources()
-                    
-                    # Kill any existing instances
-                    kill_existing_instances()
-                    
-                    # Wait to ensure cleanup is complete
-                    time.sleep(10)  # Longer wait to ensure cleanup is complete
+                            sock.close()
+                        except:
+                            pass
                             
                 except Exception as cleanup_error:
                     logging.error(f"Error during conflict cleanup: {cleanup_error}")
-                    import traceback
-                    logging.error(traceback.format_exc())
                 
                 if retry_count >= max_retries:
                     logging.error("Maximum retry attempts reached")
-                    # Make sure we release locks before exiting
-                    cleanup_resources()  # Final cleanup attempt
                     return
                     
-                # Increment retry count after cleanup
-                retry_count += 1
-                    
-                # Exponential backoff with randomization
-                backoff_time = min(backoff_time * 1.5 + random.uniform(10, 20), 180)  # Cap at 180 seconds
+                # Longer backoff with more randomization
+                backoff_time = backoff_time * 2 + random.uniform(0, 10)
                 logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt")
                 time.sleep(backoff_time)
-                
-                # Kill any existing instances before retrying
-                kill_existing_instances()
-                cleanup_resources()
-                time.sleep(10)  # Longer wait for cleanup to complete
                 
             except Exception as e:
                 logging.error(f"Failed to start bot: {e}")
                 import traceback
                 logging.error(traceback.format_exc())
                 
-                # Perform cleanup in case of general errors too
-                try:
-                    # Stop the updater if it's running
-                    if updater and hasattr(updater, 'stop'):
-                        try:
-                            updater.stop()
-                            logging.info("Stopped updater after general error")
-                        except Exception as stop_error:
-                            logging.error(f"Error stopping updater: {stop_error}")
-                    
-                    # Clean up resources
-                    cleanup_resources()
-                except Exception as cleanup_error:
-                    logging.error(f"Error during cleanup after general error: {cleanup_error}")
-                
                 retry_count += 1
-                # Use exponential backoff with randomization for general errors too
-                backoff_time = min(backoff_time * 2 + random.uniform(5, 15), 180)  # Cap at 180 seconds
+                backoff_time *= 2
                 logging.info(f"Waiting {backoff_time:.1f} seconds before next attempt")
                 time.sleep(backoff_time)
                 
-                # Kill any existing instances before retrying
-                kill_existing_instances()
-                time.sleep(5)  # Wait for cleanup to complete
-                
                 if retry_count >= max_retries:
                     logging.error("Maximum retry attempts reached")
-                    cleanup_resources()  # Final cleanup attempt
                     return
 
         # Run the bot
@@ -2843,9 +2535,22 @@ def main():
         logging.error(traceback.format_exc())
     finally:
         logging.info("Performing cleanup")
-        cleanup_resources()
-        graceful_shutdown(updater, bot_lock_socket)
+        graceful_shutdown(updater, lock_socket)
         logging.info("Cleanup complete")
+
+
+# Global variables to track bot state
+bot_updater = None
+bot_lock_socket = None
+
+# Signal handler for graceful shutdown
+def signal_handler(sig, frame):
+    """Handle termination signals to ensure graceful shutdown."""
+    logging.info(f"Received signal {sig}, initiating graceful shutdown...")
+    global bot_updater, bot_lock_socket
+    graceful_shutdown(bot_updater, bot_lock_socket)
+    import sys
+    sys.exit(0)
 
 if __name__ == "__main__":
     try:
@@ -2854,19 +2559,24 @@ if __name__ == "__main__":
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
         
-        # Kill any existing instances before starting
-        kill_existing_instances()
-        
-        # Clean up any existing resources
-        cleanup_resources()
-        
-        # Wait for resources to be available
-        time.sleep(10)
-        
-        # Start the bot
-        main()
+        # Check if another instance is already running before starting
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Try to bind to the lock port - this will fail if another instance is running
+            test_socket.bind(('localhost', 10001))
+            test_socket.close()
+            # If we get here, no other instance is running, so we can start
+            logging.info("No other instances detected, starting bot...")
+            main()
+        except socket.error:
+            # Another instance is already running
+            logging.error("Another instance of the bot is already running. Exiting.")
+            test_socket.close()
+            import sys
+            sys.exit(1)
     except Exception as e:
-        logging.critical(f"Critical error during startup: {e}")
+        logging.critical(f"Critical error during startup check: {e}")
         import traceback
         logging.critical(traceback.format_exc())
+        import sys
         sys.exit(1)
