@@ -2428,10 +2428,7 @@ def main():
             return
         
         # Create updater with correct timeout parameters
-        updater = Updater(BOT_TOKEN, request_kwargs={
-            'read_timeout': 90,
-            'connect_timeout': 120
-        })
+        updater = Updater(BOT_TOKEN)
         bot_updater = updater
         
         # Register handlers
@@ -2494,9 +2491,7 @@ def main():
                     timeout=120,  # Longer timeout
                     drop_pending_updates=True,
                     allowed_updates=['message', 'callback_query', 'chat_member'],
-                    bootstrap_retries=5,  # More bootstrap retries
-                    read_timeout=90,
-                    connect_timeout=120
+                    bootstrap_retries=5  # More bootstrap retries
                 )
                 
                 logging.info("Bot started successfully")
