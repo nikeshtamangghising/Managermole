@@ -252,8 +252,20 @@ def cleanup_sockets():
         global bot_lock_socket
         if bot_lock_socket:
             try:
-                bot_lock_socket.close()
-                logging.info("Closed lock socket")
+                # Check if socket is still valid before closing
+                if hasattr(bot_lock_socket, 'fileno') and bot_lock_socket.fileno() >= 0:
+                    bot_lock_socket.close()
+                    logging.info("Closed lock socket")
+                else:
+                    logging.info("Lock socket already closed or invalid")
+                # Set to None to prevent further usage
+                bot_lock_socket = None
+            except OSError as e:
+                if e.errno == errno.EBADF:  # Bad file descriptor
+                    logging.info("Socket already closed or invalid")
+                    bot_lock_socket = None
+                else:
+                    logging.error(f"Error closing lock socket: {e}")
             except Exception as e:
                 logging.error(f"Error closing lock socket: {e}")
         
@@ -261,7 +273,8 @@ def cleanup_sockets():
         if hasattr(socket, '_socketobject'):
             for sock in socket._socketobject._instances:
                 try:
-                    sock.close()
+                    if hasattr(sock, 'fileno') and sock.fileno() >= 0:
+                        sock.close()
                 except:
                     pass
     except Exception as e:
@@ -299,14 +312,19 @@ def create_socket_lock():
             if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
                 lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             
-            # Set socket to non-blocking mode
-            lock_socket.setblocking(False)
+            # Keep socket in blocking mode for reliability
+            lock_socket.setblocking(True)
             
             # Try to bind to the lock port
             lock_socket.bind(('localhost', LOCK_PORT))
             
-            # Set a longer timeout
-            lock_socket.settimeout(60)
+            # Set a reasonable timeout that won't cause issues with heartbeats
+            lock_socket.settimeout(120)
+            
+            # Verify socket is valid before proceeding
+            if lock_socket.fileno() < 0:
+                logging.error("Created socket has invalid file descriptor")
+                return None
             
             # Create lock file with PID
             with open(LOCK_FILE, 'w') as f:
@@ -316,16 +334,32 @@ def create_socket_lock():
             atexit.register(cleanup_lock_file)
             
             # Start a more robust heartbeat mechanism
-            def keep_socket_alive():
-                while True:
+            def keep_socket_alive(socket_ref):
+                # Use a local reference to the socket to prevent issues with global variable changes
+                local_socket = socket_ref
+                running = True
+                
+                while running:
                     try:
-                        lock_socket.sendto(b'heartbeat', ('localhost', LOCK_PORT))
+                        # Check if socket is still valid before sending heartbeat
+                        if local_socket is None or local_socket.fileno() < 0:
+                            logging.warning("Socket appears to be closed or invalid, stopping heartbeat")
+                            break
+                            
+                        local_socket.sendto(b'heartbeat', ('localhost', LOCK_PORT))
                         time.sleep(5)  # More frequent heartbeats
+                    except OSError as e:
+                        # Handle specific socket errors
+                        if e.errno == errno.EBADF:  # Bad file descriptor
+                            logging.warning("Socket descriptor is no longer valid, stopping heartbeat")
+                        else:
+                            logging.error(f"Socket error in heartbeat: {e}")
+                        break
                     except Exception as e:
                         logging.error(f"Heartbeat error: {e}")
                         break
             
-            heartbeat_thread = threading.Thread(target=keep_socket_alive, daemon=True)
+            heartbeat_thread = threading.Thread(target=keep_socket_alive, args=(lock_socket,), daemon=True)
             heartbeat_thread.start()
             
             logging.info(f"Successfully acquired socket lock on port {LOCK_PORT}")
@@ -418,8 +452,20 @@ def graceful_shutdown(updater=None, lock_socket=None):
         # Close socket lock
         if lock_socket:
             try:
-                lock_socket.close()
-                logging.info("Closed socket lock")
+                # Check if socket is still valid before closing
+                if hasattr(lock_socket, 'fileno') and lock_socket.fileno() >= 0:
+                    lock_socket.close()
+                    logging.info("Closed socket lock")
+                else:
+                    logging.info("Socket lock already closed or invalid")
+                # Set global variable to None to prevent further usage
+                global bot_lock_socket
+                bot_lock_socket = None
+            except OSError as e:
+                if e.errno == errno.EBADF:  # Bad file descriptor
+                    logging.info("Socket lock already closed or invalid")
+                else:
+                    logging.error(f"Error closing socket lock: {e}")
             except Exception as e:
                 logging.error(f"Error closing socket lock: {e}")
         
