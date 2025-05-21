@@ -217,11 +217,12 @@ def cleanup_webhook():
                 logging.info("No webhook found, skipping cleanup")
                 return
                 
-            # Don't use drop_pending_updates here to avoid conflicts
-            cleanup_bot.delete_webhook(drop_pending_updates=False)
+            # Use drop_pending_updates=True to ensure clean state
+            cleanup_bot.delete_webhook(drop_pending_updates=True)
             logging.info("Cleaned up existing webhook")
             
             # Verify webhook was deleted
+            time.sleep(3)  # Wait before verification
             webhook_info = cleanup_bot.get_webhook_info()
             if not webhook_info.url:
                 logging.info("Webhook deletion verified")
@@ -239,10 +240,19 @@ def cleanup_webhook():
             logging.error(f"Error cleaning up webhook (attempt {attempt}/{max_attempts}): {e}")
             import traceback
             logging.error(traceback.format_exc())
-            time.sleep(2)  # Wait before retrying
+            time.sleep(3)  # Wait before retrying
     
     if attempt >= max_attempts:
         logging.warning("Maximum webhook cleanup attempts reached")
+        # Try one last time with a different approach
+        try:
+            final_bot = Bot(BOT_TOKEN)
+            final_bot.delete_webhook(drop_pending_updates=True)
+            logging.info("Final webhook cleanup attempt completed")
+            del final_bot
+        except Exception as final_error:
+            logging.error(f"Final webhook cleanup attempt failed: {final_error}")
+            pass
 
 
 def cleanup_sockets():
@@ -285,7 +295,7 @@ def create_socket_lock():
     # First, try to kill any existing instances
     kill_existing_instances()
     logging.info("Waiting for existing processes to terminate")
-    time.sleep(10)  # Longer wait for processes to be killed
+    time.sleep(5)  # Shorter wait for processes to be killed
     
     # Create a new socket for locking
     lock_socket = None
@@ -316,10 +326,28 @@ def create_socket_lock():
             lock_socket.setblocking(True)
             
             # Try to bind to the lock port
-            lock_socket.bind(('localhost', LOCK_PORT))
+            try:
+                lock_socket.bind(('localhost', LOCK_PORT))
+                logging.info(f"Successfully bound to port {LOCK_PORT}")
+            except socket.error as bind_error:
+                logging.error(f"Failed to bind to lock port: {bind_error}")
+                # Port is already in use, another instance is running
+                if lock_socket:
+                    lock_socket.close()
+                
+                # If this is our last attempt, give up
+                if attempt >= max_attempts:
+                    logging.error("Maximum socket lock attempts reached, giving up")
+                    return None
+                    
+                # Otherwise wait and try again
+                wait_time = 5 * attempt
+                logging.info(f"Waiting {wait_time} seconds before next attempt")
+                time.sleep(wait_time)
+                continue
             
             # Set a reasonable timeout that won't cause issues with heartbeats
-            lock_socket.settimeout(120)
+            lock_socket.settimeout(60)  # Shorter timeout
             
             # Verify socket is valid before proceeding
             if lock_socket.fileno() < 0:
@@ -347,7 +375,7 @@ def create_socket_lock():
                             break
                             
                         local_socket.sendto(b'heartbeat', ('localhost', LOCK_PORT))
-                        time.sleep(5)  # More frequent heartbeats
+                        time.sleep(3)  # More frequent heartbeats
                     except OSError as e:
                         # Handle specific socket errors
                         if e.errno == errno.EBADF:  # Bad file descriptor
@@ -364,10 +392,9 @@ def create_socket_lock():
             
             logging.info(f"Successfully acquired socket lock on port {LOCK_PORT}")
             return lock_socket
-            
-        except socket.error as bind_error:
-            logging.error(f"Failed to bind to lock port (attempt {attempt}/{max_attempts}): {bind_error}")
-            # Port is already in use, another instance is running
+                
+        except Exception as e:
+            logging.error(f"Failed to acquire socket lock: {e}")
             try:
                 if lock_socket:
                     lock_socket.close()
@@ -380,22 +407,13 @@ def create_socket_lock():
                 return None
                 
             # Otherwise wait and try again
-            wait_time = 5 * attempt
+            wait_time = 3 * attempt
             logging.info(f"Waiting {wait_time} seconds before next attempt")
             time.sleep(wait_time)
-                
-        except Exception as e:
-            logging.error(f"Failed to acquire socket lock: {e}")
-            try:
-                if lock_socket:
-                    lock_socket.close()
-            except:
-                pass
-            return None
 
 def graceful_shutdown(updater=None, lock_socket=None):
     """Perform a graceful shutdown of the bot."""
-    global SHUTDOWN_IN_PROGRESS
+    global SHUTDOWN_IN_PROGRESS, bot_lock_socket, BOT_INSTANCE_LOCK
     
     if SHUTDOWN_IN_PROGRESS:
         logging.info("Shutdown already in progress, skipping duplicate shutdown")
@@ -405,43 +423,42 @@ def graceful_shutdown(updater=None, lock_socket=None):
     logging.info("Starting graceful shutdown...")
     
     try:
-        # First, try to delete webhook without drop_pending_updates
-        if updater and hasattr(updater, 'bot'):
-            try:
-                # Create a new bot instance for webhook deletion to avoid conflicts
-                cleanup_bot = Bot(BOT_TOKEN)
-                webhook_info = cleanup_bot.get_webhook_info()
-                
-                if webhook_info.url:
-                    cleanup_bot.delete_webhook(drop_pending_updates=False)
-                    logging.info("Deleted webhook during shutdown")
-                    # Add a delay to ensure webhook deletion is processed
-                    time.sleep(5)
-                else:
-                    logging.info("No webhook found during shutdown")
-                    
-                # Clean up the bot instance
-                del cleanup_bot
-            except Exception as e:
-                logging.error(f"Error deleting webhook: {e}")
-        
-        # Stop the updater
+        # First stop the updater to prevent further conflicts
         if updater:
             try:
                 # Reset update fetcher state first
-                if hasattr(updater.dispatcher, '_update_fetcher'):
+                if hasattr(updater, 'dispatcher') and hasattr(updater.dispatcher, '_update_fetcher'):
                     if hasattr(updater.dispatcher._update_fetcher, '_last_update_id'):
                         updater.dispatcher._update_fetcher._last_update_id = 0
                     if hasattr(updater.dispatcher._update_fetcher, 'running'):
                         updater.dispatcher._update_fetcher.running = False
                 
+                # Stop the updater
                 updater.stop()
                 logging.info("Stopped updater")
             except Exception as e:
                 logging.error(f"Error stopping updater: {e}")
         
+        # Delete webhook after stopping updater
+        try:
+            # Create a new bot instance for webhook deletion to avoid conflicts
+            cleanup_bot = Bot(BOT_TOKEN)
+            webhook_info = cleanup_bot.get_webhook_info()
+            
+            if webhook_info.url:
+                cleanup_bot.delete_webhook(drop_pending_updates=True)
+                logging.info("Deleted webhook during shutdown")
+                # Add a delay to ensure webhook deletion is processed
+                time.sleep(3)
+            else:
+                logging.info("No webhook found during shutdown")
+                
+            # Clean up the bot instance
+            del cleanup_bot
+        except Exception as e:
+            logging.error(f"Error deleting webhook: {e}")
+        
         # Release thread lock
-        global BOT_INSTANCE_LOCK
         if BOT_INSTANCE_LOCK.locked():
             try:
                 BOT_INSTANCE_LOCK.release()
@@ -459,7 +476,6 @@ def graceful_shutdown(updater=None, lock_socket=None):
                 else:
                     logging.info("Socket lock already closed or invalid")
                 # Set global variable to None to prevent further usage
-                global bot_lock_socket
                 bot_lock_socket = None
             except OSError as e:
                 if e.errno == errno.EBADF:  # Bad file descriptor
@@ -501,6 +517,9 @@ def graceful_shutdown(updater=None, lock_socket=None):
     finally:
         SHUTDOWN_IN_PROGRESS = False
         logging.info("Shutdown complete")
+        
+        # Set global variables to None to prevent further usage
+        bot_updater = None
 
 def error_handler(update, context):
     """Handle errors in the dispatcher with improved conflict resolution."""
@@ -525,12 +544,26 @@ def error_handler(update, context):
                 logging.warning("Thread lock not held by this instance - this instance should terminate")
             else:
                 logging.warning("Thread lock held by this instance but conflict detected - possible race condition")
+                # Release the lock since we're going to terminate anyway
+                try:
+                    BOT_INSTANCE_LOCK.release()
+                    logging.info("Released thread lock during conflict resolution")
+                except Exception as lock_error:
+                    logging.error(f"Error releasing thread lock: {lock_error}")
                 
             # Always terminate this instance if we encounter a conflict
             logging.warning("Conflict detected - terminating this instance")
             
             # More aggressive cleanup
             try:
+                # First stop the updater if it's running to prevent further conflicts
+                if hasattr(context.dispatcher, 'updater') and context.dispatcher.updater:
+                    try:
+                        context.dispatcher.updater.stop()
+                        logging.info("Stopped updater during conflict resolution")
+                    except Exception as updater_error:
+                        logging.error(f"Error stopping updater: {updater_error}")
+                
                 # Delete webhook without drop_pending_updates to avoid conflicts
                 if hasattr(context, 'bot'):
                     try:
@@ -550,15 +583,7 @@ def error_handler(update, context):
                         context.dispatcher._update_fetcher.running = False
                         logging.info("Stopped update fetcher")
                 
-                # Stop the updater if it's running
-                if hasattr(context.dispatcher, 'updater') and context.dispatcher.updater:
-                    try:
-                        context.dispatcher.updater.stop()
-                        logging.info("Stopped updater during conflict resolution")
-                    except Exception as updater_error:
-                        logging.error(f"Error stopping updater: {updater_error}")
-                
-                # Release thread lock if we're holding it
+                # Release thread lock if we're still holding it somehow
                 if BOT_INSTANCE_LOCK.locked():
                     try:
                         BOT_INSTANCE_LOCK.release()
@@ -572,16 +597,13 @@ def error_handler(update, context):
                 # Perform graceful shutdown
                 graceful_shutdown(bot_updater, bot_lock_socket)
                 
-                # Wait longer to ensure cleanup is complete
-                time.sleep(10)
-                
-                # Wait longer to ensure cleanup is complete
-                time.sleep(15)
+                # Wait to ensure cleanup is complete
+                time.sleep(5)
                 
                 # Force exit this instance
                 logging.info("Exiting due to conflict resolution")
                 SHUTDOWN_IN_PROGRESS = False
-                sys.exit(1)
+                os._exit(1)  # Use os._exit for more forceful termination
                 
             except Exception as e:
                 logging.error(f"Failed to recover from conflict: {e}")
@@ -589,7 +611,7 @@ def error_handler(update, context):
                 logging.error(traceback.format_exc())
                 # Still exit even if cleanup failed
                 SHUTDOWN_IN_PROGRESS = False
-                sys.exit(1)
+                os._exit(1)  # Use os._exit for more forceful termination
                 
         elif isinstance(context.error, NetworkError):
             logging.error(f"Network error: {context.error}. Waiting before retry.")
@@ -2407,7 +2429,10 @@ def start_add_custom_bank(update: Update, context) -> None:
 
 def main():
     """Start the bot with enhanced instance management."""
-    global bot_updater, bot_lock_socket, BOT_INSTANCE_LOCK
+    global bot_updater, bot_lock_socket, BOT_INSTANCE_LOCK, SHUTDOWN_IN_PROGRESS
+    
+    # Reset shutdown flag at the beginning
+    SHUTDOWN_IN_PROGRESS = False
     
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
@@ -2421,13 +2446,13 @@ def main():
     logging.info("Cleaning up any existing resources")
     cleanup_resources()
     
-    # Wait longer for resources to be available
+    # Wait for resources to be available
     logging.info("Waiting for resources to be available")
-    time.sleep(15)
+    time.sleep(10)
     
     # Acquire thread lock first to prevent race conditions
     logging.info("Attempting to acquire thread lock")
-    if not BOT_INSTANCE_LOCK.acquire(timeout=45):  # Longer timeout
+    if not BOT_INSTANCE_LOCK.acquire(timeout=30):  # Reasonable timeout
         logging.error("Failed to acquire thread lock - exiting")
         return
         
@@ -2451,7 +2476,7 @@ def main():
         release_file_lock()
         if BOT_INSTANCE_LOCK.locked():
             BOT_INSTANCE_LOCK.release()
-            return
+        return
     
     logging.info("Socket lock acquired successfully - all locks in place")
     logging.info("Bot instance is now the primary instance")
@@ -2462,8 +2487,7 @@ def main():
             f.write(str(os.getpid()))
     except Exception as e:
         logging.error(f"Error writing PID file: {e}")
-        release_file_lock()
-        BOT_INSTANCE_LOCK.release()
+        cleanup_resources()  # Ensure cleanup happens
         return
     
     updater = None
@@ -2544,7 +2568,6 @@ def main():
                 break
                 
             except Conflict as ce:
-                retry_count += 1
                 logging.error(f"Conflict error on attempt {retry_count}/{max_retries}: {ce}")
                 
                 # Aggressive cleanup
@@ -2558,8 +2581,25 @@ def main():
                     if hasattr(dp, '_update_fetcher'):
                         if hasattr(dp._update_fetcher, 'running'):
                             dp._update_fetcher.running = False
+                        if hasattr(dp._update_fetcher, '_last_update_id'):
                             dp._update_fetcher._last_update_id = 0
                             logging.info("Reset update fetcher during conflict resolution")
+                    
+                    # Delete webhook to ensure clean state
+                    try:
+                        # Create a new bot instance for webhook deletion
+                        cleanup_bot = Bot(BOT_TOKEN)
+                        webhook_info = cleanup_bot.get_webhook_info()
+                        
+                        if webhook_info.url:
+                            cleanup_bot.delete_webhook(drop_pending_updates=True)
+                            logging.info("Deleted webhook during conflict resolution")
+                            time.sleep(5)  # Wait for webhook deletion to process
+                        
+                        # Clean up the bot instance
+                        del cleanup_bot
+                    except Exception as webhook_error:
+                        logging.error(f"Error deleting webhook: {webhook_error}")
                     
                     # Release thread lock if we're holding it
                     if BOT_INSTANCE_LOCK.locked():
@@ -2575,8 +2615,8 @@ def main():
                     # Kill any existing instances
                     kill_existing_instances()
                     
-                    # Wait longer to ensure cleanup is complete
-                    time.sleep(10)
+                    # Wait to ensure cleanup is complete
+                    time.sleep(5)
                             
                 except Exception as cleanup_error:
                     logging.error(f"Error during conflict cleanup: {cleanup_error}")
@@ -2586,10 +2626,11 @@ def main():
                 if retry_count >= max_retries:
                     logging.error("Maximum retry attempts reached")
                     # Make sure we release locks before exiting
-                    if BOT_INSTANCE_LOCK.locked():
-                        BOT_INSTANCE_LOCK.release()
-                    release_file_lock()
+                    cleanup_resources()  # Final cleanup attempt
                     return
+                    
+                # Increment retry count after cleanup
+                retry_count += 1
                     
                 # Longer backoff with more randomization
                 backoff_time = min(backoff_time * 1.5 + random.uniform(5, 15), 120)  # Cap at 120 seconds
@@ -2599,7 +2640,7 @@ def main():
                 # Kill any existing instances before retrying
                 kill_existing_instances()
                 cleanup_resources()
-                time.sleep(10)  # Wait for cleanup to complete
+                time.sleep(5)  # Wait for cleanup to complete
                 
             except Exception as e:
                 logging.error(f"Failed to start bot: {e}")
